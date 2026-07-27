@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+.env
+node_modules/
+web/dist/
+*.tsbuildinfo
+vite.config.ts.timestamp-*
+.DS_Store
+*.log
+.pytest_cache/

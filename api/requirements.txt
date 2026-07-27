@@ -1,0 +1,16 @@
+fastapi==0.140.6
+uvicorn[standard]==0.51.0
+sqlalchemy==2.0.51
+alembic==1.18.5
+psycopg[binary]==3.3.4
+geoalchemy2==0.20.0
+paho-mqtt==2.1.0
+cryptography==49.0.0
+pydantic==2.13.4
+
+# Official Meshtastic protobuf/CLI package. We only use the compiled
+# protobuf messages (meshtastic.protobuf.*) for decoding MQTT traffic, but
+# depending on the upstream package -- rather than vendoring copies of the
+# .proto-generated files -- means protocol changes are picked up with a
+# routine version bump instead of a manual re-sync.
+meshtastic==2.7.11

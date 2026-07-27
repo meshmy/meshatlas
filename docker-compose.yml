@@ -1,0 +1,57 @@
+services:
+  db:
+    image: postgis/postgis:16-3.4
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-meshatlas}
+      POSTGRES_USER: ${POSTGRES_USER:-meshatlas}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me}
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-meshatlas}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build:
+      context: ./api
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://meshatlas:change-me@db:5432/meshatlas}
+      ENABLED_SOURCES: ${ENABLED_SOURCES:-meshtastic}
+      MESHTASTIC_MQTT_HOST: ${MESHTASTIC_MQTT_HOST:-mqtt.lucifernet.com}
+      MESHTASTIC_MQTT_PORT: ${MESHTASTIC_MQTT_PORT:-1883}
+      MESHTASTIC_MQTT_USERNAME: ${MESHTASTIC_MQTT_USERNAME:-}
+      MESHTASTIC_MQTT_PASSWORD: ${MESHTASTIC_MQTT_PASSWORD:-}
+      MESHTASTIC_MQTT_TLS: ${MESHTASTIC_MQTT_TLS:-false}
+      MESHTASTIC_MQTT_TOPIC: ${MESHTASTIC_MQTT_TOPIC:-msh/#}
+      MESHTASTIC_CHANNEL_KEYS: ${MESHTASTIC_CHANNEL_KEYS:-}
+    ports:
+      - "${API_PORT:-8000}:8000"
+    volumes:
+      - ./api:/app
+    command: >
+      sh -c "alembic upgrade head &&
+             uvicorn app.main:app --host 0.0.0.0 --port 8000"
+
+  web:
+    build:
+      context: ./web
+      args:
+        API_BASE_URL: ${API_BASE_URL:-/api}
+        MAP_STYLE_URL: ${MAP_STYLE_URL:-https://tiles.openfreemap.org/styles/liberty}
+    restart: unless-stopped
+    depends_on:
+      - api
+    environment:
+      API_UPSTREAM: api:8000
+    ports:
+      - "${WEB_PORT:-8080}:8080"
+
+volumes:
+  db-data:

@@ -1,0 +1,165 @@
+:root {
+  color-scheme: dark;
+  --bg: #10151c;
+  --panel-bg: #161d26;
+  --border: #2a3441;
+  --text: #e6edf3;
+  --muted: #93a1af;
+  --accent: #4da3ff;
+  --good: #3ecf6a;
+  --weak: #e0553c;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  color: var(--text);
+  background: var(--bg);
+}
+
+#app {
+  display: flex;
+}
+
+#map {
+  flex: 1 1 auto;
+  position: relative;
+}
+
+#panel {
+  width: 300px;
+  flex: 0 0 auto;
+  background: var(--panel-bg);
+  border-left: 1px solid var(--border);
+  padding: 16px;
+  overflow-y: auto;
+}
+
+#panel h1 {
+  font-size: 1.25rem;
+  margin: 0 0 2px;
+}
+
+.subtitle {
+  margin: 0 0 16px;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+#panel section {
+  margin-bottom: 18px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+#panel section:last-of-type {
+  border-bottom: none;
+}
+
+#panel label {
+  display: block;
+  font-size: 0.85rem;
+  margin-bottom: 4px;
+  color: var(--muted);
+}
+
+#panel input[type="range"],
+#panel select {
+  width: 100%;
+}
+
+#panel h2 {
+  font-size: 0.95rem;
+  margin: 0 0 8px;
+}
+
+#selection dl {
+  font-size: 0.85rem;
+  margin: 0;
+}
+
+#selection dt {
+  color: var(--muted);
+}
+
+#selection dd {
+  margin: 0 0 8px;
+}
+
+#clear-selection {
+  width: 100%;
+  padding: 6px;
+  background: var(--border);
+  color: var(--text);
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.legend-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.85rem;
+  margin-bottom: 6px;
+  color: var(--muted);
+}
+
+.swatch {
+  display: inline-block;
+  width: 20px;
+  height: 3px;
+  border-radius: 2px;
+}
+
+.swatch.good {
+  background: var(--good);
+}
+
+.swatch.weak {
+  background: var(--weak);
+}
+
+.dot {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+.status {
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+
+.maplibregl-popup-content {
+  background: var(--panel-bg);
+  color: var(--text);
+  font-size: 0.85rem;
+}
+
+.maplibregl-popup-tip {
+  border-top-color: var(--panel-bg) !important;
+  border-bottom-color: var(--panel-bg) !important;
+}
+
+.node-popup dt {
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+
+.node-popup dd {
+  margin: 0 0 6px;
+}

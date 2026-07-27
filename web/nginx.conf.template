@@ -1,0 +1,30 @@
+# Templated by the official nginx image's docker-entrypoint envsubst step
+# (files under /etc/nginx/templates/*.template are rendered to
+# /etc/nginx/conf.d/*.conf on container start) -- see web/Dockerfile.
+server {
+    listen 8080;
+    server_name _;
+
+    root /usr/share/nginx/html;
+    index index.html;
+
+    # Single-page app: any non-file route falls back to index.html so
+    # client-side routing (e.g. ?node=... deep links) keeps working.
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+
+    location /api/ {
+        proxy_pass http://${API_UPSTREAM}/api/;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+
+    location /ws/ {
+        proxy_pass http://${API_UPSTREAM}/ws/;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_read_timeout 3600s;
+    }
+}

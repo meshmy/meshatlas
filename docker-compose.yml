@@ -1,13 +1,37 @@
 services:
   db:
-    image: postgis/postgis:16-3.4
+    # Note: bumping the Postgres major version (e.g. 16 -> 18) is only
+    # safe for a fresh volume -- Postgres doesn't support in-place major
+    # upgrades by swapping images. An existing db-data volume from an
+    # older major version needs a pg_dump/restore (or pg_upgrade) before
+    # this image will start against it.
+    image: postgis/postgis:18-3.6
+    # postgis/postgis has never published an arm64 manifest for any tag
+    # (checked Docker Hub directly, including the 16-3.4 this project
+    # started on) -- it's amd64-only. Docker Desktop on Apple Silicon can
+    # run it fine via Rosetta/QEMU emulation, but only if it's not also
+    # trying to satisfy an exact-arch manifest match first, which some
+    # Docker Desktop configurations (e.g. the containerd image store) do
+    # by default and fail loudly with "no matching manifest" instead of
+    # falling back to emulation. Pinning the platform here skips that
+    # negotiation and goes straight to emulated amd64.
+    platform: linux/amd64
     restart: unless-stopped
+    env_file:
+      - secrets.env # POSTGRES_PASSWORD
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-meshatlas}
       POSTGRES_USER: ${POSTGRES_USER:-meshatlas}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me}
     volumes:
-      - db-data:/var/lib/postgresql/data
+      # Postgres 18 changed PGDATA to /var/lib/postgresql/MAJOR/docker and
+      # expects a single volume mounted at the parent /var/lib/postgresql,
+      # matching pg_ctlcluster's layout -- not the pre-18 convention of
+      # mounting directly at /var/lib/postgresql/data. Mounting at the old
+      # path makes the 18+ entrypoint refuse to start (its "is this a
+      # legacy layout?" safety check fires on the path itself being
+      # present, not just on it being populated). See
+      # https://github.com/docker-library/postgres/pull/1259.
+      - db-data:/var/lib/postgresql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-meshatlas}"]
       interval: 5s
@@ -21,13 +45,20 @@ services:
     depends_on:
       db:
         condition: service_healthy
+    env_file:
+      - secrets.env # POSTGRES_PASSWORD, MESHTASTIC_MQTT_USERNAME/PASSWORD
     environment:
-      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://meshatlas:change-me@db:5432/meshatlas}
+      # app/config.py builds DATABASE_URL from these parts (plus
+      # POSTGRES_PASSWORD from secrets.env) rather than taking a single
+      # precomposed connection string, so the password only ever lives in
+      # one place.
+      POSTGRES_DB: ${POSTGRES_DB:-meshatlas}
+      POSTGRES_USER: ${POSTGRES_USER:-meshatlas}
+      POSTGRES_HOST: db
+      POSTGRES_PORT: "5432"
       ENABLED_SOURCES: ${ENABLED_SOURCES:-meshtastic}
       MESHTASTIC_MQTT_HOST: ${MESHTASTIC_MQTT_HOST:-mqtt.lucifernet.com}
       MESHTASTIC_MQTT_PORT: ${MESHTASTIC_MQTT_PORT:-1883}
-      MESHTASTIC_MQTT_USERNAME: ${MESHTASTIC_MQTT_USERNAME:-}
-      MESHTASTIC_MQTT_PASSWORD: ${MESHTASTIC_MQTT_PASSWORD:-}
       MESHTASTIC_MQTT_TLS: ${MESHTASTIC_MQTT_TLS:-false}
       MESHTASTIC_MQTT_TOPIC: ${MESHTASTIC_MQTT_TOPIC:-msh/#}
       MESHTASTIC_CHANNEL_KEYS: ${MESHTASTIC_CHANNEL_KEYS:-}
@@ -44,7 +75,7 @@ services:
       context: ./web
       args:
         API_BASE_URL: ${API_BASE_URL:-/api}
-        MAP_STYLE_URL: ${MAP_STYLE_URL:-https://tiles.openfreemap.org/styles/liberty}
+        MAP_STYLE_URL: ${MAP_STYLE_URL:-https://tiles.openfreemap.org/styles/dark}
     restart: unless-stopped
     depends_on:
       - api

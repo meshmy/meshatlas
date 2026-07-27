@@ -15,7 +15,8 @@ Ingests live from a Meshtastic MQTT broker (defaults to
 ## Quick start
 
 ```bash
-cp .env.example .env      # adjust MQTT broker / channel keys if needed
+cp .env.example .env              # ordinary config: MQTT broker, ports, map style, ...
+cp secrets.env.example secrets.env  # credentials, kept in a separate gitignored file
 docker compose up --build
 ```
 
@@ -81,19 +82,36 @@ rewrite.
 
 ## Configuration
 
-All configuration is environment variables, see `.env.example`. The ones
-you're most likely to change:
+Configuration is environment variables, split across two files:
 
-- `MESHTASTIC_MQTT_HOST` / `_PORT` / `_USERNAME` / `_PASSWORD` / `_TLS` --
-  point at a different MQTT broker (e.g. your own Meshtastic MQTT
-  module, or `mqtt.meshtastic.org`).
+- **`.env`** (from `.env.example`) -- ordinary, non-sensitive config.
+- **`secrets.env`** (from `secrets.env.example`) -- anything
+  credential-shaped (`POSTGRES_PASSWORD`, `MESHTASTIC_MQTT_USERNAME`/
+  `_PASSWORD`), kept separate and gitignored on principle, even where the
+  shipped defaults are public/well-known values (the Meshtastic project's
+  standard `meshdev`/`large4cats` MQTT login). `app/config.py` builds
+  `DATABASE_URL` from the Postgres pieces at runtime so the password is
+  never duplicated into a second env var.
+
+The ones you're most likely to change:
+
+- `MESHTASTIC_MQTT_HOST` / `_PORT` / `_TLS` (`.env`) and
+  `MESHTASTIC_MQTT_USERNAME` / `_PASSWORD` (`secrets.env`) -- point at a
+  different MQTT broker (e.g. your own Meshtastic MQTT module, or
+  `mqtt.meshtastic.org`).
 - `MESHTASTIC_CHANNEL_KEYS` -- comma-separated base64 PSKs for private
   channels. The public default channel key is always tried first, so
   public "LongFast" traffic decodes with no configuration.
-- `MAP_STYLE_URL` -- swap the basemap for any MapLibre-compatible style
-  (Protomaps, your own OpenMapTiles server, etc.). 3D buildings look for
-  a `building` layer using the OpenMapTiles schema; other schemas will
-  just skip that layer gracefully.
+- `MAP_STYLE_URL` -- swap the basemap for any MapLibre-compatible style.
+  Defaults to OpenFreeMap's free "dark" style; "liberty", "bright" and
+  "positron" are also free/no-key (just swap the last path segment of
+  `https://tiles.openfreemap.org/styles/...`), or point at Protomaps/your
+  own OpenMapTiles server. 3D buildings look for a `building` layer using
+  the OpenMapTiles schema; other schemas just skip that layer gracefully.
+  CARTO's Dark Matter style is a decent alternative with better default
+  water/land contrast, but its tile CDN isn't reachable from every
+  network -- if the map never finishes loading after switching to it,
+  that's why; go back to the OpenFreeMap default.
 
 ## Repository layout
 

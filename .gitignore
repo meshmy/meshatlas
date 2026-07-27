@@ -4,6 +4,7 @@ __pycache__/
 venv/
 *.egg-info/
 .env
+secrets.env
 node_modules/
 web/dist/
 *.tsbuildinfo

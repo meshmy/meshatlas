@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
+from urllib.parse import quote
 
 
 def _bool(value: str | None, default: bool = False) -> bool:
@@ -48,6 +49,25 @@ class MeshtasticConfig:
         )
 
 
+def _database_url() -> str:
+    # DATABASE_URL, if set, always wins -- useful for pointing at an
+    # external managed Postgres that doesn't fit the
+    # POSTGRES_USER/PASSWORD/DB/HOST/PORT shape below. Otherwise, build it
+    # from parts so POSTGRES_PASSWORD (see secrets.env) is the only place
+    # the credential itself is ever written, rather than being duplicated
+    # inside a second, precomposed connection-string env var.
+    explicit = os.environ.get("DATABASE_URL")
+    if explicit:
+        return explicit
+
+    user = os.environ.get("POSTGRES_USER", "meshatlas")
+    password = os.environ.get("POSTGRES_PASSWORD", "change-me")
+    host = os.environ.get("POSTGRES_HOST", "localhost")
+    port = os.environ.get("POSTGRES_PORT", "5432")
+    db = os.environ.get("POSTGRES_DB", "meshatlas")
+    return f"postgresql+psycopg://{quote(user, safe='')}:{quote(password, safe='')}@{host}:{port}/{db}"
+
+
 @dataclass(frozen=True, slots=True)
 class Settings:
     database_url: str
@@ -57,10 +77,7 @@ class Settings:
     @classmethod
     def from_env(cls) -> "Settings":
         return cls(
-            database_url=os.environ.get(
-                "DATABASE_URL",
-                "postgresql+psycopg://meshatlas:change-me@localhost:5432/meshatlas",
-            ),
+            database_url=_database_url(),
             enabled_sources=_list(os.environ.get("ENABLED_SOURCES", "meshtastic")),
             meshtastic=MeshtasticConfig.from_env(),
         )

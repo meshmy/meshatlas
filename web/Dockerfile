@@ -1,5 +1,5 @@
 # --- build stage -----------------------------------------------------
-FROM node:20-slim AS build
+FROM node:24-slim AS build
 WORKDIR /app
 
 # Baked into the built JS bundle by Vite (see src/api.ts, src/mapSetup.ts).
@@ -17,7 +17,7 @@ COPY . .
 RUN npm run build
 
 # --- serve stage -------------------------------------------------------
-FROM nginx:1.27-alpine
+FROM nginx:1.30-alpine
 
 COPY nginx.conf.template /etc/nginx/templates/default.conf.template
 COPY --from=build /app/dist /usr/share/nginx/html

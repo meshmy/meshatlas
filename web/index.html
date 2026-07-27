@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>MeshAtlas</title>
+  </head>
+  <body>
+    <div id="app">
+      <div id="map"></div>
+      <aside id="panel">
+        <h1>MeshAtlas</h1>
+        <p class="subtitle">Live Meshtastic node &amp; coverage map</p>
+
+        <section>
+          <label for="hours">Coverage window</label>
+          <input id="hours" type="range" min="1" max="168" step="1" value="6" />
+          <output id="hours-value" for="hours">6h</output>
+        </section>
+
+        <section>
+          <label><input id="toggle-heard-direct" type="checkbox" checked /> Direct RF contacts</label>
+          <label><input id="toggle-neighbor-report" type="checkbox" checked /> Self-reported neighbors</label>
+        </section>
+
+        <section>
+          <label for="active-hours">Show nodes last seen within</label>
+          <select id="active-hours">
+            <option value="1">1 hour</option>
+            <option value="6" selected>6 hours</option>
+            <option value="24">24 hours</option>
+            <option value="168">7 days</option>
+            <option value="">All time</option>
+          </select>
+        </section>
+
+        <section>
+          <label>Node status</label>
+          <label><input id="status-fresh" type="checkbox" checked /> Fresh (&lt;15 min)</label>
+          <label><input id="status-stale" type="checkbox" checked /> Stale (&lt;1 hour)</label>
+          <label><input id="status-offline" type="checkbox" checked /> Offline</label>
+        </section>
+
+        <section>
+          <label>Systems</label>
+          <div id="systems-list"><!-- populated from /api/systems --></div>
+        </section>
+
+        <section id="selection" hidden>
+          <h2 id="selection-name"></h2>
+          <dl id="selection-details"></dl>
+          <button id="clear-selection">Show all contacts</button>
+        </section>
+
+        <section>
+          <h2>Legend</h2>
+          <div class="legend-row"><span class="swatch good"></span> Strong link (high SNR)</div>
+          <div class="legend-row"><span class="swatch weak"></span> Weak link (low SNR)</div>
+          <div class="legend-row"><span class="dot"></span> Node</div>
+        </section>
+
+        <p id="status" class="status">connecting&hellip;</p>
+      </aside>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

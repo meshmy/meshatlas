@@ -89,7 +89,7 @@ map.on("load", () => {
   window.clearTimeout(loadTimeout);
   try {
     nodesLayer = new NodesLayer(map);
-    linksLayer = new LinksLayer(new DeckOverlay(map));
+    linksLayer = new LinksLayer(new DeckOverlay(map), map);
 
     map.addSource(HISTORY_SOURCE_ID, { type: "geojson", data: emptyLineCollection() });
     map.addLayer({
@@ -104,6 +104,12 @@ map.on("load", () => {
     });
 
     nodesLayer.onNodeClick((feature) => selectNode(feature.properties.native_id, feature));
+    // Terrain DEM tiles (used by linksLayer's queryTerrainElevation) can
+    // still be loading when links first render, and more tiles load in as
+    // the camera pans -- "idle" fires once the map has settled after each
+    // such change, so re-running the link render against already-cached
+    // data here keeps line endpoints matched to where node markers render.
+    map.on("idle", () => linksLayer?.refreshHeights());
     resolveLayersReady();
   } catch (err) {
     console.error("meshatlas: failed to initialize map layers", err);

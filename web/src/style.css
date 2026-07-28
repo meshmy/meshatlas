@@ -160,6 +160,10 @@ body {
   border-bottom-color: var(--panel-bg) !important;
 }
 
+.maplibregl-popup-close-button {
+  color: var(--text);
+}
+
 .node-popup dt {
   color: var(--muted);
   font-size: 0.75rem;

@@ -21,6 +21,7 @@
         <section>
           <label><input id="toggle-heard-direct" type="checkbox" checked /> Direct RF contacts</label>
           <label><input id="toggle-neighbor-report" type="checkbox" checked /> Self-reported neighbors</label>
+          <label><input id="toggle-show-all-links" type="checkbox" /> Always show all neighbor lines</label>
         </section>
 
         <section>
@@ -44,12 +45,6 @@
         <section>
           <label>Systems</label>
           <div id="systems-list"><!-- populated from /api/systems --></div>
-        </section>
-
-        <section id="selection" hidden>
-          <h2 id="selection-name"></h2>
-          <dl id="selection-details"></dl>
-          <button id="clear-selection">Show all contacts</button>
         </section>
 
         <section>

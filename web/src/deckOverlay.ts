@@ -26,7 +26,16 @@ export class DeckOverlay {
   private readonly overlay: MapboxOverlay;
 
   constructor(map: MapLibreMap) {
-    this.overlay = new MapboxOverlay({ interleaved: true, layers: [], getTooltip });
+    this.overlay = new MapboxOverlay({
+      interleaved: true,
+      layers: [],
+      getTooltip,
+      // deck.gl's default picking radius is 0px -- exact-pixel hit testing
+      // against a 2-4px-wide line is nearly impossible to land a hover on.
+      // Widening it makes the SNR tooltip actually reachable.
+      pickingRadius: 10,
+      onError: (err) => console.error("meshatlas: deck.gl error", err),
+    });
     map.addControl(this.overlay as unknown as IControl);
   }
 
@@ -35,11 +44,14 @@ export class DeckOverlay {
   }
 }
 
+// LinksLayer's PathLayer/SolidPolygonLayer both key their data on
+// `{ feature: LinkFeature, ... }` rather than a bare LinkFeature (see
+// linksLayer.ts's RenderableLink), so picked objects come back wrapped --
+// this only needs the one field, not the rest of that shape.
 function getTooltip(info: PickingInfo): { text: string } | null {
-  const feature = info.object as LinkFeature | undefined;
-  if (!feature) return null;
-  const { snr } = feature.properties;
-  return {
-    text: snr === null ? "SNR unknown (no reading in latest report)" : `SNR ${snr.toFixed(1)} dB`,
-  };
+  const picked = info.object as { feature: LinkFeature } | undefined;
+  if (!picked) return null;
+  const { snr, from_display_name, to_display_name } = picked.feature.properties;
+  const snrText = snr === null ? "SNR unknown (no reading in latest report)" : `SNR ${snr.toFixed(1)} dB`;
+  return { text: `${from_display_name} → ${to_display_name}\n${snrText}` };
 }

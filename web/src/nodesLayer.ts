@@ -19,6 +19,8 @@ export class NodesLayer {
   private readonly map: MapLibreMap;
   private readonly nodes = new Map<string, NodeFeature>();
   private onSelect: ((feature: NodeFeature) => void) | null = null;
+  private onHover: ((feature: NodeFeature | null) => void) | null = null;
+  private hoveredId: string | null = null;
   private refreshTimer: number | undefined;
 
   // null = "no restriction"; both default to showing everything.
@@ -85,6 +87,22 @@ export class NodesLayer {
     });
     this.map.on("mouseleave", CIRCLE_LAYER_ID, () => {
       this.map.getCanvas().style.cursor = "";
+      if (this.hoveredId !== null) {
+        this.hoveredId = null;
+        this.onHover?.(null);
+      }
+    });
+    // "mouseenter"/"mouseleave" on a layer only fire once for the whole
+    // layer (entering/leaving *a* circle, not switching between two
+    // adjacent ones), so per-feature hover needs "mousemove" instead,
+    // comparing against the last-hovered id to only fire onHover when it
+    // actually changes.
+    this.map.on("mousemove", CIRCLE_LAYER_ID, (event) => {
+      const feature = event.features?.[0] as MapGeoJSONFeature | undefined;
+      const id = (feature?.properties.native_id as string | undefined) ?? null;
+      if (id === this.hoveredId) return;
+      this.hoveredId = id;
+      this.onHover?.(feature ? featureFromMapFeature(feature) : null);
     });
 
     this.refreshTimer = window.setInterval(() => this.render(), 30_000);
@@ -92,6 +110,13 @@ export class NodesLayer {
 
   onNodeClick(handler: (feature: NodeFeature) => void): void {
     this.onSelect = handler;
+  }
+
+  /** Fires with the hovered node's feature on entry, and with `null` when
+   * the pointer leaves it (whether onto empty map or straight onto a
+   * different node -- see the mousemove/mouseleave wiring above). */
+  onNodeHover(handler: (feature: NodeFeature | null) => void): void {
+    this.onHover = handler;
   }
 
   /** `null` clears the restriction (show every system). Purely a display

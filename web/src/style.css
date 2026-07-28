@@ -8,6 +8,7 @@
   --accent: #4da3ff;
   --good: #3ecf6a;
   --weak: #e0553c;
+  --unknown: #78828c;
 }
 
 * {
@@ -129,6 +130,10 @@ body {
 
 .swatch.weak {
   background: var(--weak);
+}
+
+.swatch.unknown {
+  background: var(--unknown);
 }
 
 .dot {

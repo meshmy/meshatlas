@@ -1,6 +1,7 @@
-import type { Layer } from "@deck.gl/core";
+import type { Layer, PickingInfo } from "@deck.gl/core";
 import { MapboxOverlay } from "@deck.gl/mapbox";
 import type { IControl, Map as MapLibreMap } from "maplibre-gl";
+import type { LinkFeature } from "./types";
 
 /** One shared deck.gl WebGL context for the whole map.
  *
@@ -25,11 +26,20 @@ export class DeckOverlay {
   private readonly overlay: MapboxOverlay;
 
   constructor(map: MapLibreMap) {
-    this.overlay = new MapboxOverlay({ interleaved: true, layers: [] });
+    this.overlay = new MapboxOverlay({ interleaved: true, layers: [], getTooltip });
     map.addControl(this.overlay as unknown as IControl);
   }
 
   setLayers(layers: Layer[]): void {
     this.overlay.setProps({ layers });
   }
+}
+
+function getTooltip(info: PickingInfo): { text: string } | null {
+  const feature = info.object as LinkFeature | undefined;
+  if (!feature) return null;
+  const { snr } = feature.properties;
+  return {
+    text: snr === null ? "SNR unknown (no reading in latest report)" : `SNR ${snr.toFixed(1)} dB`,
+  };
 }

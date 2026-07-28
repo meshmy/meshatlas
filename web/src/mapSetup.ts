@@ -6,6 +6,7 @@ import {
   TerrainControl,
 } from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
+import { loadSavedViewport, persistViewportOnChange } from "./viewportPersistence";
 
 // Public, free, no-API-key elevation tiles descended from the original
 // Mapzen/AWS "Terrarium" DEM tileset. See:
@@ -38,13 +39,15 @@ const BUILDING_SOURCE_CANDIDATES = ["openmaptiles", "carto", "openfreemap", "pro
 
 export function createMap(container: HTMLElement): MapLibreMap {
   const styleUrl = import.meta.env.VITE_MAP_STYLE_URL ?? DEFAULT_STYLE_URL;
+  const savedViewport = loadSavedViewport();
 
   const map = new MapLibreMap({
     container,
     style: styleUrl,
-    center: [0, 20],
-    zoom: 2,
-    pitch: 45,
+    center: savedViewport ? [savedViewport.lng, savedViewport.lat] : [0, 20],
+    zoom: savedViewport?.zoom ?? 2,
+    pitch: savedViewport?.pitch ?? 45,
+    bearing: savedViewport?.bearing ?? 0,
     maxPitch: 85,
     canvasContextAttributes: { antialias: true },
   });
@@ -54,6 +57,7 @@ export function createMap(container: HTMLElement): MapLibreMap {
   map.addControl(new GeolocateControl({ trackUserLocation: false }), "top-left");
 
   map.on("load", () => setUpTerrainAndBuildings(map));
+  persistViewportOnChange(map);
 
   return map;
 }

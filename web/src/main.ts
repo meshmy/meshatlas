@@ -4,6 +4,7 @@ import { createMap } from "./mapSetup";
 import { DeckOverlay } from "./deckOverlay";
 import { LinksLayer } from "./linksLayer";
 import { NodesLayer, type NodeStatus } from "./nodesLayer";
+import { loadSavedViewport } from "./viewportPersistence";
 import "./style.css";
 import type { LinkFeature, LiveMessage, NodeFeature } from "./types";
 
@@ -42,7 +43,10 @@ let selectedNativeId: string | null = null;
 // labels) once zoomed in past roughly city/regional level. Once we know
 // where the actual nodes are, fit to them instead; see fitToNodesOnce().
 // Only happens once so it doesn't fight the user panning around afterwards.
-let hasFitInitialBounds = false;
+// Also skipped entirely when a saved viewport was restored (see
+// viewportPersistence.ts) -- otherwise a returning user's restored view
+// would immediately get clobbered by this auto-fit.
+let hasFitInitialBounds = loadSavedViewport() !== null;
 // Populated from GET /api/systems on load. Every system this deployment's
 // backend knows about (see app/db.py::KNOWN_SYSTEMS) gets a checkbox here
 // automatically -- enabling e.g. APRS on the backend later needs no

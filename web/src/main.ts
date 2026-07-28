@@ -1,6 +1,6 @@
 import { LngLatBounds, Popup, type GeoJSONSource } from "maplibre-gl";
 import { connectLiveFeed, getLinks, getNodeHistory, getNodes, getSystems } from "./api";
-import { createMap } from "./mapSetup";
+import { createMap, setTerrainExaggeration } from "./mapSetup";
 import { DeckOverlay } from "./deckOverlay";
 import { LinksLayer } from "./linksLayer";
 import { NodesLayer, type NodeStatus } from "./nodesLayer";
@@ -20,6 +20,8 @@ const map = createMap(mapContainer);
 const hoursInput = requireElement<HTMLInputElement>("hours");
 const hoursValue = requireElement<HTMLOutputElement>("hours-value");
 const activeHoursSelect = requireElement<HTMLSelectElement>("active-hours");
+const terrainExaggerationInput = requireElement<HTMLInputElement>("terrain-exaggeration");
+const terrainExaggerationValue = requireElement<HTMLOutputElement>("terrain-exaggeration-value");
 const toggleHeardDirect = requireElement<HTMLInputElement>("toggle-heard-direct");
 const toggleNeighborReport = requireElement<HTMLInputElement>("toggle-neighbor-report");
 const toggleShowAllLinks = requireElement<HTMLInputElement>("toggle-show-all-links");
@@ -166,6 +168,16 @@ hoursInput.addEventListener("input", () => {
   hoursValue.textContent = `${hoursInput.value}h`;
 });
 hoursInput.addEventListener("change", () => void refreshLinks());
+terrainExaggerationInput.addEventListener("input", () => {
+  const exaggeration = Number(terrainExaggerationInput.value);
+  terrainExaggerationValue.textContent = `${exaggeration}x`;
+  setTerrainExaggeration(map, exaggeration);
+  // Line endpoints are lifted to queryTerrainElevation() (see
+  // linksLayer.ts), which changes as soon as the DEM is redrawn at the new
+  // exaggeration -- without this the links stay pinned to the old terrain
+  // height until the next unrelated camera move fires "idle".
+  void layersReady.then(() => linksLayer?.refreshHeights());
+});
 activeHoursSelect.addEventListener("change", () => void refreshNodes());
 toggleHeardDirect.addEventListener("change", () => void applyLinkFilters());
 toggleNeighborReport.addEventListener("change", () => void applyLinkFilters());

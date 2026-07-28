@@ -1,6 +1,6 @@
 import { LngLatBounds, Popup, type GeoJSONSource } from "maplibre-gl";
 import { connectLiveFeed, getLinks, getNodeHistory, getNodes, getSystems } from "./api";
-import { createMap, setTerrainExaggeration } from "./mapSetup";
+import { createMap, setBuildingExaggeration, setTerrainExaggeration } from "./mapSetup";
 import { DeckOverlay } from "./deckOverlay";
 import { LinksLayer } from "./linksLayer";
 import { NodesLayer, type NodeStatus } from "./nodesLayer";
@@ -177,6 +177,12 @@ terrainExaggerationInput.addEventListener("input", () => {
   // exaggeration -- without this the links stay pinned to the old terrain
   // height until the next unrelated camera move fires "idle".
   void layersReady.then(() => linksLayer?.refreshHeights());
+});
+// Deliberately "change" (drag release), not "input" -- see
+// setBuildingExaggeration's comment in mapSetup.ts for why firing this on
+// every drag tick left buildings stuck at a stale height.
+terrainExaggerationInput.addEventListener("change", () => {
+  setBuildingExaggeration(map, Number(terrainExaggerationInput.value));
 });
 activeHoursSelect.addEventListener("change", () => void refreshNodes());
 toggleHeardDirect.addEventListener("change", () => void applyLinkFilters());

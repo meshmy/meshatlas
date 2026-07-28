@@ -157,17 +157,31 @@ function improveLowZoomContrast(map: MapLibreMap): void {
   }
 }
 
-/** Called from the terrain-exaggeration slider. Updates the live terrain
- * (a no-op if terrain is currently toggled off via TerrainControl) and the
- * control's own options so a subsequent toggle-off/on doesn't revert to
- * DEFAULT_TERRAIN_EXAGGERATION -- see the terrainControl comment above. */
+/** Called from the terrain-exaggeration slider on every "input" tick.
+ * Updates the live terrain (a no-op if terrain is currently toggled off via
+ * TerrainControl) and the control's own options so a subsequent toggle-off/on
+ * doesn't revert to DEFAULT_TERRAIN_EXAGGERATION -- see the terrainControl
+ * comment above. Cheap: raster-dem elevation is sampled per-frame in the
+ * vertex shader, not baked into a tile bucket, so this redraws instantly. */
 export function setTerrainExaggeration(map: MapLibreMap, exaggeration: number): void {
   if (terrainControl) terrainControl.options.exaggeration = exaggeration;
   if (map.getTerrain()) map.setTerrain({ source: TERRAIN_SOURCE_ID, exaggeration });
-  if (map.getLayer(BUILDINGS_LAYER_ID)) {
-    map.setPaintProperty(BUILDINGS_LAYER_ID, "fill-extrusion-height", buildingHeightExpr(exaggeration));
-    map.setPaintProperty(BUILDINGS_LAYER_ID, "fill-extrusion-base", buildingBaseExpr(exaggeration));
-  }
+}
+
+/** Called from the terrain-exaggeration slider's "change" event (drag
+ * release / arrow-key commit) rather than "input" -- unlike terrain,
+ * fill-extrusion-height/base are data-driven paint properties, so MapLibre
+ * has to re-parse and rebuild every already-loaded building tile's vertex
+ * buffers in the worker on each call (see Style#_reloadSource). Calling this
+ * on every "input" tick queued a reload per intermediate value during a
+ * single drag; with enough visible building tiles those overlapping reloads
+ * piled up and the visible result silently stayed on a stale value until
+ * some unrelated camera move (which forces a full source update) flushed it.
+ * Firing once on release avoids the pile-up entirely. */
+export function setBuildingExaggeration(map: MapLibreMap, exaggeration: number): void {
+  if (!map.getLayer(BUILDINGS_LAYER_ID)) return;
+  map.setPaintProperty(BUILDINGS_LAYER_ID, "fill-extrusion-height", buildingHeightExpr(exaggeration));
+  map.setPaintProperty(BUILDINGS_LAYER_ID, "fill-extrusion-base", buildingBaseExpr(exaggeration));
 }
 
 function pickBuildingSource(map: MapLibreMap): string | null {

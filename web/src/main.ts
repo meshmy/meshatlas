@@ -1,6 +1,6 @@
 import { LngLatBounds, Popup, type GeoJSONSource } from "maplibre-gl";
 import { connectLiveFeed, getLinks, getNodeHistory, getNodes, getSystems } from "./api";
-import { createMap, setBuildingExaggeration, setTerrainExaggeration } from "./mapSetup";
+import { createMap, setBuildingExaggeration, setBuildingRenderDistance, setTerrainExaggeration } from "./mapSetup";
 import { DeckOverlay } from "./deckOverlay";
 import { LinksLayer } from "./linksLayer";
 import { NodesLayer, type NodeStatus } from "./nodesLayer";
@@ -22,6 +22,8 @@ const hoursValue = requireElement<HTMLOutputElement>("hours-value");
 const activeHoursSelect = requireElement<HTMLSelectElement>("active-hours");
 const terrainExaggerationInput = requireElement<HTMLInputElement>("terrain-exaggeration");
 const terrainExaggerationValue = requireElement<HTMLOutputElement>("terrain-exaggeration-value");
+const buildingRenderDistanceInput = requireElement<HTMLInputElement>("building-render-distance");
+const buildingRenderDistanceValue = requireElement<HTMLOutputElement>("building-render-distance-value");
 const toggleHeardDirect = requireElement<HTMLInputElement>("toggle-heard-direct");
 const toggleNeighborReport = requireElement<HTMLInputElement>("toggle-neighbor-report");
 const toggleShowAllLinks = requireElement<HTMLInputElement>("toggle-show-all-links");
@@ -183,6 +185,11 @@ terrainExaggerationInput.addEventListener("input", () => {
 // every drag tick left buildings stuck at a stale height.
 terrainExaggerationInput.addEventListener("change", () => {
   setBuildingExaggeration(map, Number(terrainExaggerationInput.value));
+});
+buildingRenderDistanceInput.addEventListener("input", () => {
+  const level = Number(buildingRenderDistanceInput.value);
+  buildingRenderDistanceValue.textContent = `+${level}`;
+  setBuildingRenderDistance(map, level);
 });
 activeHoursSelect.addEventListener("change", () => void refreshNodes());
 toggleHeardDirect.addEventListener("change", () => void applyLinkFilters());

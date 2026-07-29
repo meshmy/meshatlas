@@ -42,6 +42,22 @@ const TERRAIN_SOURCE_ID = "meshatlas-terrain";
 const BUILDINGS_LAYER_ID = "meshatlas-3d-buildings";
 export const DEFAULT_TERRAIN_EXAGGERATION = 1;
 
+// MapLibre decays tile resolution toward the horizon on pitched views (see
+// createCalculateTileZoomFunction in maplibre-gl/src/geo/projection/covering_tiles.ts).
+// Of the two knobs setSourceTileLodParams() exposes, tileCountMaxMinRatio
+// only binds once the pitched view's natural tile count already exceeds it
+// -- measured empirically against this map's ~37 deg FOV/maxPitch 85, it did
+// basically nothing even cranked to 100. maxZoomLevelsOnScreen is the one
+// that actually matters here: MapLibre's own default (9.314) aggressively
+// decays zoom toward the horizon; *lowering* it (confirmed via network
+// tile-request counts and visibly more distant labels/geometry rendering)
+// is what keeps distant tiles at a usable resolution instead of dropping
+// out once they cross the building layer's minzoom. tileCountMaxMinRatio is
+// left fixed at a generous constant since tuning it has no visible effect.
+const MAPLIBRE_DEFAULT_MAX_ZOOM_LEVELS_ON_SCREEN = 9.314;
+const BUILDING_TILE_COUNT_RATIO = 10;
+export const DEFAULT_BUILDING_DRAW_DISTANCE_LEVEL = 3;
+
 // Set once setUpTerrainAndBuildings() runs (on the map's "load" event); a
 // module-level singleton is fine since createMap() is only ever called once
 // per page. Kept around so setTerrainExaggeration() can update its
@@ -50,6 +66,13 @@ export const DEFAULT_TERRAIN_EXAGGERATION = 1;
 // terrain back on, so without this a slider change would get silently
 // reverted the next time the user toggled terrain off and on.
 let terrainControl: TerrainControl | null = null;
+
+// Set once setUpTerrainAndBuildings() resolves a building source, so
+// setBuildingRenderDistance() can re-target the same source later. Note
+// setSourceTileLodParams() applies to every layer sharing this vector
+// source (roads, land use, labels, ...), not just buildings -- MapLibre's
+// tile LOD is a per-source property, there's no per-layer equivalent.
+let buildingSourceId: string | null = null;
 
 export function createMap(container: HTMLElement): MapLibreMap {
   const styleUrl = import.meta.env.VITE_MAP_STYLE_URL ?? DEFAULT_STYLE_URL;
@@ -110,14 +133,14 @@ function setUpTerrainAndBuildings(map: MapLibreMap): void {
 
   improveLowZoomContrast(map);
 
-  const buildingSourceId = pickBuildingSource(map);
+  buildingSourceId = pickBuildingSource(map);
   if (buildingSourceId) {
     map.addLayer({
       id: BUILDINGS_LAYER_ID,
       type: "fill-extrusion",
       source: buildingSourceId,
       "source-layer": "building",
-      minzoom: 13,
+      minzoom: 12,
       paint: {
         "fill-extrusion-color": "#5c6b7a",
         "fill-extrusion-height": buildingHeightExpr(DEFAULT_TERRAIN_EXAGGERATION),
@@ -125,7 +148,19 @@ function setUpTerrainAndBuildings(map: MapLibreMap): void {
         "fill-extrusion-opacity": 0.85,
       },
     });
+    setBuildingRenderDistance(map, DEFAULT_BUILDING_DRAW_DISTANCE_LEVEL);
   }
+}
+
+/** Called from the "Building draw distance" slider (0 = MapLibre's stock
+ * horizon falloff, higher = more/further distant tile detail -- see the
+ * constant comment above for why this drives maxZoomLevelsOnScreen down
+ * rather than tileCountMaxMinRatio up). No-op before the building source
+ * has resolved (map "load" hasn't fired yet). */
+export function setBuildingRenderDistance(map: MapLibreMap, level: number): void {
+  if (!buildingSourceId) return;
+  const maxZoomLevelsOnScreen = MAPLIBRE_DEFAULT_MAX_ZOOM_LEVELS_ON_SCREEN - level;
+  map.setSourceTileLodParams(maxZoomLevelsOnScreen, BUILDING_TILE_COUNT_RATIO, buildingSourceId);
 }
 
 /** Scaling building height/base by the same factor as the terrain slider

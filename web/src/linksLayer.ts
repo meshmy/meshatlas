@@ -1,4 +1,4 @@
-import { PathLayer, SolidPolygonLayer } from "@deck.gl/layers";
+import { IconLayer, PathLayer } from "@deck.gl/layers";
 import type { Map as MapLibreMap } from "maplibre-gl";
 import type { DeckOverlay } from "./deckOverlay";
 import type { LinkFeature } from "./types";
@@ -37,70 +37,92 @@ type Coordinate3D = [number, number, number];
 const CURVE_OFFSET_FRACTION = 0.08;
 const CURVE_OFFSET_MIN_M = 40;
 const CURVE_OFFSET_MAX_M = 1500;
+
+// The bow's perpendicular offset above is purely horizontal (lon/lat
+// plane), which can visually collapse to near-zero screen separation when
+// high camera pitch coincides with a bearing that looks straight along
+// that offset axis. A vertical (altitude) offset is orthogonal to any
+// camera ray as long as pitch stays under 90 deg (mapSetup's maxPitch: 85
+// guarantees that), and is most visible in exactly the near-horizon views
+// where the horizontal bow is weakest -- so adding it alongside the
+// horizontal bow keeps the two directions visually separated regardless of
+// pitch/bearing. Applied asymmetrically (see buildCurvedPath) so it can
+// only raise a curve further from the ground, never toward it.
+const CURVE_VERTICAL_OFFSET_FRACTION = 0.02;
+const CURVE_VERTICAL_OFFSET_MIN_M = 8;
+const CURVE_VERTICAL_OFFSET_MAX_M = 200;
+
 // Even, so t=0.5 (the arrow position) lands exactly on a sampled index
 // below -- an odd count would mean the loop's `i === CURVE_SAMPLE_POINTS/2`
 // check never matches an integer i, silently leaving the arrow at the
 // pre-loop fallback position (the raw, non-terrain-lifted control point)
 // instead of the actual curve midpoint.
-const CURVE_SAMPLE_POINTS = 8;
+const CURVE_SAMPLE_POINTS = 16;
 
-// The directional arrowhead is plain triangle geometry (SolidPolygonLayer)
-// rather than a rotated icon -- this deck.gl version's IconLayer turned
-// out to have real, confirmed problems with billboard:false (the mode we
-// need so the arrow stays flat in the world and tracks the map's
-// bearing/pitch like the line does, instead of always facing the
-// camera): getAngle silently not taking visual effect, and switching from
-// one constant icon to a dynamic per-instance icon set making everything
-// disappear entirely with no error. Geometry sidesteps all of that by
-// reusing the exact same world-space rendering path already proven
-// correct for the line itself -- there's no icon atlas, rotation
-// accessor, or billboard mode left to go wrong.
-//
-// Sized relative to the link's own length (like CURVE_OFFSET_*) so it
-// stays visible whether the link spans hundreds of metres or tens of
-// kilometres, clamped so it neither disappears on short links nor
-// dwarfs long ones.
-const ARROW_LENGTH_FRACTION = 0.05;
-const ARROW_LENGTH_MIN_M = 30;
-const ARROW_LENGTH_MAX_M = 400;
-const ARROW_WIDTH_RATIO = 0.7;
+// The directional arrowhead is a billboarded IconLayer (always facing the
+// camera, constant on-screen pixel size) rather than the flat world-space
+// triangle geometry this used to be. An earlier deck.gl version had real,
+// confirmed problems with IconLayer in billboard:false mode (world-
+// tracking rotation) combined with a dynamic per-instance icon atlas:
+// getAngle silently not taking visual effect, and switching from one
+// constant icon to a dynamic per-instance icon set making everything
+// disappear entirely with no error. billboard:true with a single static
+// icon (below) is a materially different, much more standard code path.
+const ARROW_ICON_TEXTURE_PX = 128;
+const ARROW_SIZE_HEARD_DIRECT_PX = 20;
+const ARROW_SIZE_RELAYED_PX = 15;
 
-/** A small filled triangle centered at `at`, tip pointing from src toward
- * dst. */
-function buildArrowTriangle(
-  src: Coordinate3D,
-  dst: Coordinate3D,
-  at: Coordinate3D,
-): [Coordinate3D, Coordinate3D, Coordinate3D] {
+function buildArrowIconDataUrl(px: number): string {
+  const tipX = px / 2;
+  const svg =
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${px}" height="${px}" ` +
+    `viewBox="0 0 ${px} ${px}"><polygon points="${tipX},4 ${px - 4},${px - 4} 4,${px - 4}" fill="#fff"/></svg>`;
+  return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+}
+
+// Structural stand-in for deck.gl's UnpackedIcon (icon-manager.ts) -- not
+// re-exported from @deck.gl/layers's public index, so this is typed
+// locally; IconLayer's getIcon accessor type-checks against it
+// structurally.
+interface ArrowIconDef {
+  url: string;
+  id: string;
+  width: number;
+  height: number;
+  mask: boolean;
+}
+
+// A flat white triangle, tip at the top of its square viewBox. mask: true
+// means only this image's alpha channel is used for shape -- getColor
+// fully supplies the RGB per-instance, so this one icon covers every SNR
+// color (see colorForSnr) without needing per-color variants.
+const ARROW_ICON: ArrowIconDef = {
+  url: buildArrowIconDataUrl(ARROW_ICON_TEXTURE_PX),
+  id: "meshatlas-arrow",
+  width: ARROW_ICON_TEXTURE_PX,
+  height: ARROW_ICON_TEXTURE_PX,
+  mask: true,
+};
+
+/** Compass bearing (degrees, clockwise from geographic north) of src->dst,
+ * in the same flat local tangent-plane approximation used elsewhere in
+ * this file. For the curved (hasReverse) case this is computed from the
+ * raw src/dst chord rather than the bowed path -- exact regardless, since
+ * a quadratic Bezier's tangent at t=0.5 always equals P2-P0 (the chord
+ * direction) independent of the control point, and the arrow sits at
+ * exactly that t=0.5 point. */
+function computeBearingDeg(src: Coordinate3D, dst: Coordinate3D): number {
   const [srcLon, srcLat] = src;
   const [dstLon, dstLat] = dst;
   const midLat = (srcLat + dstLat) / 2;
   const metersPerDegLon = METERS_PER_DEG_LAT * Math.cos((midLat * Math.PI) / 180);
-
-  const dxM = (dstLon - srcLon) * metersPerDegLon;
-  const dyM = (dstLat - srcLat) * METERS_PER_DEG_LAT;
-  const lengthM = Math.hypot(dxM, dyM) || 1;
-  const uxM = dxM / lengthM;
-  const uyM = dyM / lengthM;
-  // Perpendicular to (uxM, uyM).
-  const pxM = -uyM;
-  const pyM = uxM;
-
-  const arrowLenM = clamp(lengthM * ARROW_LENGTH_FRACTION, ARROW_LENGTH_MIN_M, ARROW_LENGTH_MAX_M);
-  const halfLenM = arrowLenM / 2;
-  const halfWidthM = (arrowLenM * ARROW_WIDTH_RATIO) / 2;
-  const backXM = -uxM * halfLenM;
-  const backYM = -uyM * halfLenM;
-
-  return [
-    offsetMeters(at, uxM * halfLenM, uyM * halfLenM, metersPerDegLon),
-    offsetMeters(at, backXM + pxM * halfWidthM, backYM + pyM * halfWidthM, metersPerDegLon),
-    offsetMeters(at, backXM - pxM * halfWidthM, backYM - pyM * halfWidthM, metersPerDegLon),
-  ];
+  const eastM = (dstLon - srcLon) * metersPerDegLon;
+  const northM = (dstLat - srcLat) * METERS_PER_DEG_LAT;
+  return normalizeAngleDeg((Math.atan2(eastM, northM) * 180) / Math.PI);
 }
 
-function offsetMeters([lon, lat, alt]: Coordinate3D, xM: number, yM: number, metersPerDegLon: number): Coordinate3D {
-  return [lon + xM / metersPerDegLon, lat + yM / METERS_PER_DEG_LAT, alt];
+function normalizeAngleDeg(deg: number): number {
+  return ((deg % 360) + 360) % 360;
 }
 
 /** A link plus everything derived from comparing it against any reverse
@@ -109,13 +131,35 @@ function offsetMeters([lon, lat, alt]: Coordinate3D, xM: number, yM: number, met
 interface RenderableLink {
   feature: LinkFeature;
   path: Coordinate3D[];
-  arrowTriangle: [Coordinate3D, Coordinate3D, Coordinate3D];
+  arrowAt: Coordinate3D;
+  arrowBearingDeg: number;
 }
 
 export class LinksLayer {
   private readonly overlay: DeckOverlay;
   private readonly map: MapLibreMap;
   private readonly links = new Map<number, LinkFeature>();
+  private renderable: RenderableLink[] = [];
+
+  // Stable references so deck.gl's accessor-identity check only recomputes
+  // GPU attributes flagged by updateTriggers, not everything, when
+  // renderLayers() re-runs on every camera rotate tick.
+  private readonly getLinkPath = (r: RenderableLink) => r.path;
+  private readonly getLinkColor = (r: RenderableLink) => colorForSnr(r.feature.properties.snr);
+  private readonly getLinkWidth = (r: RenderableLink) =>
+    r.feature.properties.link_type === "heard_direct" ? 4 : 2.5;
+  private readonly getArrowPosition = (r: RenderableLink) => r.arrowAt;
+  private readonly getArrowColor = (r: RenderableLink) => colorForSnr(r.feature.properties.snr);
+  private readonly getArrowSize = (r: RenderableLink) =>
+    r.feature.properties.link_type === "heard_direct" ? ARROW_SIZE_HEARD_DIRECT_PX : ARROW_SIZE_RELAYED_PX;
+  // Billboard icon rotation is purely in screen space with no awareness of
+  // the map's own bearing, so it has to be compensated for here -- and
+  // recomputed (via renderLayers() on the map's "rotate" event) whenever
+  // the camera turns, or arrows would silently point the wrong screen
+  // direction as soon as bearing != 0.
+  private readonly getArrowAngle = (r: RenderableLink) =>
+    normalizeAngleDeg(r.arrowBearingDeg - this.map.getBearing());
+  private readonly getArrowIcon = () => ARROW_ICON;
 
   /** One instance covers every RF system's links: each feature already
    * carries `properties.system_id`, and (per app/db.py) a link's two ends
@@ -124,6 +168,7 @@ export class LinksLayer {
   constructor(overlay: DeckOverlay, map: MapLibreMap) {
     this.overlay = overlay;
     this.map = map;
+    map.on("rotate", () => this.renderLayers());
   }
 
   setAll(features: LinkFeature[]): void {
@@ -151,8 +196,24 @@ export class LinksLayer {
     if (this.links.size > 0) this.render();
   }
 
+  /** Rebuilds link geometry (paths, terrain heights, arrow positions/
+   * bearings) from current link data. Expensive (queries terrain per
+   * endpoint) -- call only when link data actually changes (setAll/
+   * upsert/refreshHeights), not on every camera move. */
   private render(): void {
-    const renderable = this.buildRenderableLinks();
+    this.renderable = this.buildRenderableLinks();
+    this.renderLayers();
+  }
+
+  /** Rebuilds just the deck.gl layer objects from the cached `renderable`
+   * array. Cheap: no terrain queries, no path recomputation. Called after
+   * render() (data changed) AND on every map "rotate" event (bearing
+   * changed) so arrow angles keep tracking the camera -- no "pitch"
+   * listener is needed since pitch doesn't change the in-plane screen
+   * rotation reference (no camera roll in MapLibre's orbit camera). */
+  private renderLayers(): void {
+    const renderable = this.renderable;
+    const bearing = this.map.getBearing();
 
     this.overlay.setLayers([
       new PathLayer<RenderableLink>({
@@ -161,6 +222,13 @@ export class LinksLayer {
         pickable: true,
         widthUnits: "pixels",
         widthMinPixels: 3.5,
+        // Billboard: extrude the ribbon's width in clipspace (always
+        // facing the camera) instead of world space, so it no longer
+        // thins toward edge-on and disappears at extreme pitch/viewing
+        // angles.
+        billboard: true,
+        jointRounded: true,
+        capRounded: true,
         // These are connectivity edges, not literal line-of-sight beams --
         // depth-testing them against the 3D terrain mesh meant a link
         // whose curve happened to dip (in interpolated altitude) below a
@@ -169,25 +237,32 @@ export class LinksLayer {
         // terrain instead of a solid one. Disabling depth test keeps them
         // always drawn on top, which is also just more legible.
         parameters: { depthCompare: "always", depthWriteEnabled: false },
-        getPath: (r) => r.path,
-        getColor: (r) => colorForSnr(r.feature.properties.snr),
-        getWidth: (r) => (r.feature.properties.link_type === "heard_direct" ? 4 : 2.5),
+        getPath: this.getLinkPath,
+        getColor: this.getLinkColor,
+        getWidth: this.getLinkWidth,
         updateTriggers: {
           getPath: [renderable.length],
           getColor: [renderable.length],
           getWidth: [renderable.length],
         },
       }),
-      new SolidPolygonLayer<RenderableLink>({
+      new IconLayer<RenderableLink>({
         id: "meshatlas-links-arrows",
         data: renderable,
         pickable: false,
+        billboard: true,
+        sizeUnits: "pixels",
         parameters: { depthCompare: "always", depthWriteEnabled: false },
-        getPolygon: (r) => r.arrowTriangle,
-        getFillColor: (r) => colorForSnr(r.feature.properties.snr),
+        getPosition: this.getArrowPosition,
+        getIcon: this.getArrowIcon,
+        getColor: this.getArrowColor,
+        getSize: this.getArrowSize,
+        getAngle: this.getArrowAngle,
         updateTriggers: {
-          getPolygon: [renderable.length],
-          getFillColor: [renderable.length],
+          getPosition: [renderable.length],
+          getColor: [renderable.length],
+          getSize: [renderable.length],
+          getAngle: [bearing],
         },
       }),
     ]);
@@ -224,7 +299,8 @@ export class LinksLayer {
       return {
         feature,
         path,
-        arrowTriangle: buildArrowTriangle(src, dst, midpoint3D(path[0], path[1])),
+        arrowAt: midpoint3D(path[0], path[1]),
+        arrowBearingDeg: computeBearingDeg(src, dst),
       };
     }
 
@@ -247,7 +323,8 @@ export class LinksLayer {
     return {
       feature,
       path,
-      arrowTriangle: buildArrowTriangle(src, dst, midpoint),
+      arrowAt: midpoint,
+      arrowBearingDeg: computeBearingDeg(src, dst),
     };
   }
 
@@ -281,24 +358,38 @@ export class LinksLayer {
     const controlLat = (srcLat + dstLat) / 2 + perpYM / METERS_PER_DEG_LAT;
 
     // Height only ever gets sampled from terrain at the two endpoints (as
-    // for a straight link) and interpolated linearly across the curve --
-    // querying terrain at every intermediate sample instead used to
-    // literally re-follow the real hillside between the endpoints, and
-    // over the Bay Area's sharp elevation changes that made the 3D ribbon
-    // pinch to near-zero width wherever the terrain height jumped between
-    // adjacent samples, rendering as a dashed-looking line instead of a
-    // solid one.
+    // for a straight link) and interpolated across the curve (see the
+    // control-altitude comment below) -- querying terrain at every
+    // intermediate sample instead used to literally re-follow the real
+    // hillside between the endpoints, and over the Bay Area's sharp
+    // elevation changes that made the 3D ribbon pinch to near-zero width
+    // wherever the terrain height jumped between adjacent samples,
+    // rendering as a dashed-looking line instead of a solid one.
     const liftedSrc = this.liftCoordinate(src);
     const liftedDst = this.liftCoordinate(dst);
 
+    // Vertical bow component (see CURVE_VERTICAL_OFFSET_* above), applied
+    // asymmetrically: the isLow direction's altitude is left exactly as it
+    // was (linear interpolation, midAlt extra = 0) so it carries zero new
+    // terrain-clipping risk; only the isHigh direction's curve is raised
+    // further above the endpoint interpolation, so this can only move a
+    // curve further from the ground than before, never closer to it.
+    const midAlt = (liftedSrc[2] + liftedDst[2]) / 2;
+    const vertOffsetM = clamp(lengthM * CURVE_VERTICAL_OFFSET_FRACTION, CURVE_VERTICAL_OFFSET_MIN_M, CURVE_VERTICAL_OFFSET_MAX_M);
+    const controlAlt = midAlt + (isLow ? 0 : vertOffsetM);
+
     const path: Coordinate3D[] = [];
-    let midpoint: Coordinate3D = [controlLon, controlLat, (liftedSrc[2] + liftedDst[2]) / 2];
+    let midpoint: Coordinate3D = [controlLon, controlLat, controlAlt];
     for (let i = 0; i <= CURVE_SAMPLE_POINTS; i++) {
       const t = i / CURVE_SAMPLE_POINTS;
       const omt = 1 - t;
       const lon = omt * omt * srcLon + 2 * omt * t * controlLon + t * t * dstLon;
       const lat = omt * omt * srcLat + 2 * omt * t * controlLat + t * t * dstLat;
-      const alt = liftedSrc[2] + (liftedDst[2] - liftedSrc[2]) * t;
+      // Quadratic Bezier in altitude too, matching the lon/lat
+      // parameterization -- still anchors exactly to liftedSrc[2]/
+      // liftedDst[2] at t=0/t=1 regardless of controlAlt, so lines still
+      // meet the node markers correctly.
+      const alt = omt * omt * liftedSrc[2] + 2 * omt * t * controlAlt + t * t * liftedDst[2];
       const point: Coordinate3D = [lon, lat, alt];
       path.push(point);
       if (i === CURVE_SAMPLE_POINTS / 2) midpoint = point;

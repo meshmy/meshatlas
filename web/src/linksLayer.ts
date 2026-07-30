@@ -104,23 +104,6 @@ const ARROW_ICON: ArrowIconDef = {
   mask: true,
 };
 
-/** Compass bearing (degrees, clockwise from geographic north) of src->dst,
- * in the same flat local tangent-plane approximation used elsewhere in
- * this file. For the curved (hasReverse) case this is computed from the
- * raw src/dst chord rather than the bowed path -- exact regardless, since
- * a quadratic Bezier's tangent at t=0.5 always equals P2-P0 (the chord
- * direction) independent of the control point, and the arrow sits at
- * exactly that t=0.5 point. */
-function computeBearingDeg(src: Coordinate3D, dst: Coordinate3D): number {
-  const [srcLon, srcLat] = src;
-  const [dstLon, dstLat] = dst;
-  const midLat = (srcLat + dstLat) / 2;
-  const metersPerDegLon = METERS_PER_DEG_LAT * Math.cos((midLat * Math.PI) / 180);
-  const eastM = (dstLon - srcLon) * metersPerDegLon;
-  const northM = (dstLat - srcLat) * METERS_PER_DEG_LAT;
-  return normalizeAngleDeg((Math.atan2(eastM, northM) * 180) / Math.PI);
-}
-
 function normalizeAngleDeg(deg: number): number {
   return ((deg % 360) + 360) % 360;
 }
@@ -132,7 +115,16 @@ interface RenderableLink {
   feature: LinkFeature;
   path: Coordinate3D[];
   arrowAt: Coordinate3D;
-  arrowBearingDeg: number;
+  // Two nearby points along the path, in the direction of travel, used to
+  // derive the arrow's on-screen rotation (see getArrowAngle) -- not a
+  // compass bearing, because a compass bearing can't be turned into a
+  // screen angle by a simple map-bearing subtraction once the camera is
+  // pitched: ground-plane perspective projection isn't angle-preserving,
+  // so a link's projected screen direction depends on pitch as well as
+  // bearing. Projecting these two actual world points and measuring the
+  // resulting screen-space delta sidesteps that entirely.
+  arrowTangentFrom: Coordinate3D;
+  arrowTangentTo: Coordinate3D;
 }
 
 export class LinksLayer {
@@ -140,25 +132,39 @@ export class LinksLayer {
   private readonly map: MapLibreMap;
   private readonly links = new Map<number, LinkFeature>();
   private renderable: RenderableLink[] = [];
+  // Bumped every renderLayers() call and fed into the arrow layer's
+  // getAngle updateTrigger -- the projected screen angle depends on the
+  // map's *entire* camera transform (pan/zoom/bearing/pitch all affect
+  // the projection, see arrowTangentFrom/To's doc comment), so rather
+  // than tracking which specific camera fields changed, every
+  // renderLayers() call is treated as a potential angle change.
+  private angleRevision = 0;
 
   // Stable references so deck.gl's accessor-identity check only recomputes
   // GPU attributes flagged by updateTriggers, not everything, when
-  // renderLayers() re-runs on every camera rotate tick.
+  // renderLayers() re-runs on every camera move tick.
   private readonly getLinkPath = (r: RenderableLink) => r.path;
   private readonly getLinkColor = (r: RenderableLink) => colorForSnr(r.feature.properties.snr);
   private readonly getLinkWidth = (r: RenderableLink) =>
-    r.feature.properties.link_type === "heard_direct" ? 4 : 2.5;
+    r.feature.properties.link_type === "heard_direct" ? 3 : 2;
   private readonly getArrowPosition = (r: RenderableLink) => r.arrowAt;
   private readonly getArrowColor = (r: RenderableLink) => colorForSnr(r.feature.properties.snr);
   private readonly getArrowSize = (r: RenderableLink) =>
     r.feature.properties.link_type === "heard_direct" ? ARROW_SIZE_HEARD_DIRECT_PX : ARROW_SIZE_RELAYED_PX;
-  // Billboard icon rotation is purely in screen space with no awareness of
-  // the map's own bearing, so it has to be compensated for here -- and
-  // recomputed (via renderLayers() on the map's "rotate" event) whenever
-  // the camera turns, or arrows would silently point the wrong screen
-  // direction as soon as bearing != 0.
-  private readonly getArrowAngle = (r: RenderableLink) =>
-    normalizeAngleDeg(r.arrowBearingDeg - this.map.getBearing());
+  // Billboard icon rotation is purely in screen space, with no built-in
+  // awareness of the map's camera -- so the angle has to be derived from
+  // actually projecting two nearby world points along the link's
+  // direction of travel and reading off the resulting on-screen delta,
+  // rather than from the link's compass bearing (see arrowTangentFrom/To's
+  // doc comment for why a bearing-based formula doesn't hold up once the
+  // camera is pitched).
+  private readonly getArrowAngle = (r: RenderableLink): number => {
+    const from = this.map.project([r.arrowTangentFrom[0], r.arrowTangentFrom[1]]);
+    const to = this.map.project([r.arrowTangentTo[0], r.arrowTangentTo[1]]);
+    // Screen space has y growing downward, so "up" is -y; this is the
+    // clockwise-from-up angle matching IconLayer's getAngle convention.
+    return normalizeAngleDeg((Math.atan2(to.x - from.x, -(to.y - from.y)) * 180) / Math.PI);
+  };
   private readonly getArrowIcon = () => ARROW_ICON;
 
   /** One instance covers every RF system's links: each feature already
@@ -168,7 +174,10 @@ export class LinksLayer {
   constructor(overlay: DeckOverlay, map: MapLibreMap) {
     this.overlay = overlay;
     this.map = map;
-    map.on("rotate", () => this.renderLayers());
+    // "move" (not just "rotate") because arrow angle now comes from
+    // reprojecting world points, which shifts under any camera change --
+    // pan/zoom/rotate/pitch all fire "move".
+    map.on("move", () => this.renderLayers());
   }
 
   setAll(features: LinkFeature[]): void {
@@ -207,13 +216,11 @@ export class LinksLayer {
 
   /** Rebuilds just the deck.gl layer objects from the cached `renderable`
    * array. Cheap: no terrain queries, no path recomputation. Called after
-   * render() (data changed) AND on every map "rotate" event (bearing
-   * changed) so arrow angles keep tracking the camera -- no "pitch"
-   * listener is needed since pitch doesn't change the in-plane screen
-   * rotation reference (no camera roll in MapLibre's orbit camera). */
+   * render() (data changed) AND on every map "move" event (pan/zoom/
+   * bearing/pitch all changed) so arrow angles keep tracking the camera. */
   private renderLayers(): void {
     const renderable = this.renderable;
-    const bearing = this.map.getBearing();
+    this.angleRevision++;
 
     this.overlay.setLayers([
       new PathLayer<RenderableLink>({
@@ -221,7 +228,7 @@ export class LinksLayer {
         data: renderable,
         pickable: true,
         widthUnits: "pixels",
-        widthMinPixels: 3.5,
+        widthMinPixels: 2,
         // Billboard: extrude the ribbon's width in clipspace (always
         // facing the camera) instead of world space, so it no longer
         // thins toward edge-on and disappears at extreme pitch/viewing
@@ -262,7 +269,7 @@ export class LinksLayer {
           getPosition: [renderable.length],
           getColor: [renderable.length],
           getSize: [renderable.length],
-          getAngle: [bearing],
+          getAngle: [this.angleRevision],
         },
       }),
     ]);
@@ -300,7 +307,8 @@ export class LinksLayer {
         feature,
         path,
         arrowAt: midpoint3D(path[0], path[1]),
-        arrowBearingDeg: computeBearingDeg(src, dst),
+        arrowTangentFrom: path[0],
+        arrowTangentTo: path[1],
       };
     }
 
@@ -319,12 +327,19 @@ export class LinksLayer {
     const isLow = feature.properties.from_node_id < feature.properties.to_node_id;
     const canonicalLow = isLow ? src : dst;
     const canonicalHigh = isLow ? dst : src;
-    const { path, midpoint } = this.buildCurvedPath(src, dst, canonicalLow, canonicalHigh, isLow);
+    const { path, midpoint, tangentFrom, tangentTo } = this.buildCurvedPath(
+      src,
+      dst,
+      canonicalLow,
+      canonicalHigh,
+      isLow,
+    );
     return {
       feature,
       path,
       arrowAt: midpoint,
-      arrowBearingDeg: computeBearingDeg(src, dst),
+      arrowTangentFrom: tangentFrom,
+      arrowTangentTo: tangentTo,
     };
   }
 
@@ -334,7 +349,7 @@ export class LinksLayer {
     canonicalLow: Coordinate3D,
     canonicalHigh: Coordinate3D,
     isLow: boolean,
-  ): { path: Coordinate3D[]; midpoint: Coordinate3D } {
+  ): { path: Coordinate3D[]; midpoint: Coordinate3D; tangentFrom: Coordinate3D; tangentTo: Coordinate3D } {
     const [srcLon, srcLat] = src;
     const [dstLon, dstLat] = dst;
     const [lowLon, lowLat] = canonicalLow;
@@ -378,8 +393,14 @@ export class LinksLayer {
     const vertOffsetM = clamp(lengthM * CURVE_VERTICAL_OFFSET_FRACTION, CURVE_VERTICAL_OFFSET_MIN_M, CURVE_VERTICAL_OFFSET_MAX_M);
     const controlAlt = midAlt + (isLow ? 0 : vertOffsetM);
 
+    const midIndex = CURVE_SAMPLE_POINTS / 2;
     const path: Coordinate3D[] = [];
     let midpoint: Coordinate3D = [controlLon, controlLat, controlAlt];
+    // Fallback tangent (used only if CURVE_SAMPLE_POINTS were ever small
+    // enough that midIndex-1/+1 fell outside the loop, which it never
+    // does at 16) -- overwritten below on the matching iterations.
+    let tangentFrom: Coordinate3D = midpoint;
+    let tangentTo: Coordinate3D = midpoint;
     for (let i = 0; i <= CURVE_SAMPLE_POINTS; i++) {
       const t = i / CURVE_SAMPLE_POINTS;
       const omt = 1 - t;
@@ -392,9 +413,15 @@ export class LinksLayer {
       const alt = omt * omt * liftedSrc[2] + 2 * omt * t * controlAlt + t * t * liftedDst[2];
       const point: Coordinate3D = [lon, lat, alt];
       path.push(point);
-      if (i === CURVE_SAMPLE_POINTS / 2) midpoint = point;
+      if (i === midIndex) midpoint = point;
+      // Points either side of the arrow, used for its on-screen rotation
+      // (see arrowTangentFrom/To's doc comment) -- close enough together
+      // that the local secant is a good stand-in for the curve's true
+      // tangent at the arrow's position.
+      if (i === midIndex - 1) tangentFrom = point;
+      if (i === midIndex + 1) tangentTo = point;
     }
-    return { path, midpoint };
+    return { path, midpoint, tangentFrom, tangentTo };
   }
 
   /** Node markers are a MapLibre `circle` layer, which (per MapLibre's own

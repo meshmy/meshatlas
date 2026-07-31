@@ -1,4 +1,4 @@
-import { IconLayer, PathLayer } from "@deck.gl/layers";
+import { PathLayer, SolidPolygonLayer } from "@deck.gl/layers";
 import type { Map as MapLibreMap } from "maplibre-gl";
 import type { DeckOverlay } from "./deckOverlay";
 import type { LinkFeature } from "./types";
@@ -59,53 +59,78 @@ const CURVE_VERTICAL_OFFSET_MAX_M = 200;
 // instead of the actual curve midpoint.
 const CURVE_SAMPLE_POINTS = 16;
 
-// The directional arrowhead is a billboarded IconLayer (always facing the
-// camera, constant on-screen pixel size) rather than the flat world-space
-// triangle geometry this used to be. An earlier deck.gl version had real,
-// confirmed problems with IconLayer in billboard:false mode (world-
-// tracking rotation) combined with a dynamic per-instance icon atlas:
-// getAngle silently not taking visual effect, and switching from one
-// constant icon to a dynamic per-instance icon set making everything
-// disappear entirely with no error. billboard:true with a single static
-// icon (below) is a materially different, much more standard code path.
-const ARROW_ICON_TEXTURE_PX = 128;
-const ARROW_SIZE_HEARD_DIRECT_PX = 20;
-const ARROW_SIZE_RELAYED_PX = 15;
+// The directional arrowhead is a flat world-space triangle (SolidPolygonLayer),
+// built from the same world points the line itself is built from -- not a
+// billboarded/screen-facing icon. An IconLayer with billboard:true (always
+// facing the camera) was tried first, but its rotation had to be computed
+// independently of the line (projecting world points to screen space and
+// deriving an angle each camera move) -- that computation is a plausible
+// source of the arrow visibly drifting out of sync with the line's own
+// on-screen rotation, since the two are no longer tied to the same
+// underlying geometry. Building the arrow as real geometry instead means
+// its screen orientation is *automatically* identical to the line's --
+// there's no separate rotation to get subtly wrong. (An IconLayer with
+// billboard:false -- world-tracking rotation instead of screen-facing --
+// was also considered and rejected: this exact deck.gl version has a
+// confirmed bug where getAngle silently doesn't apply in that mode.)
+//
+// Constant on-screen size is instead achieved by sizing the triangle in
+// meters per render, converted from a fixed pixel size using the standard
+// Web Mercator meters-per-pixel formula at the current zoom and the
+// arrow's own latitude (see metersPerPixel/getArrowPolygon) -- rather than
+// from the link's own length as the original triangle geometry did.
+const ARROW_LENGTH_HEARD_DIRECT_PX = 20;
+const ARROW_LENGTH_RELAYED_PX = 15;
+const ARROW_WIDTH_RATIO = 0.7;
+// Safety clamp on the meters-per-pixel-derived size -- not the primary
+// sizing mechanism, just a guard against degenerate geometry at extreme
+// zoom levels.
+const ARROW_LENGTH_MIN_M = 2;
+const ARROW_LENGTH_MAX_M = 20_000;
 
-function buildArrowIconDataUrl(px: number): string {
-  const tipX = px / 2;
-  const svg =
-    `<svg xmlns="http://www.w3.org/2000/svg" width="${px}" height="${px}" ` +
-    `viewBox="0 0 ${px} ${px}"><polygon points="${tipX},4 ${px - 4},${px - 4} 4,${px - 4}" fill="#fff"/></svg>`;
-  return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+// Standard Web Mercator ground resolution formula (meters per pixel at a
+// given latitude/zoom, calibrated to 256px tiles -- MapLibre's own zoom
+// levels follow this convention regardless of its internal 512px tiles).
+function metersPerPixel(latitudeDeg: number, zoom: number): number {
+  return (156_543.03392 * Math.cos((latitudeDeg * Math.PI) / 180)) / Math.pow(2, zoom);
 }
 
-// Structural stand-in for deck.gl's UnpackedIcon (icon-manager.ts) -- not
-// re-exported from @deck.gl/layers's public index, so this is typed
-// locally; IconLayer's getIcon accessor type-checks against it
-// structurally.
-interface ArrowIconDef {
-  url: string;
-  id: string;
-  width: number;
-  height: number;
-  mask: boolean;
+/** A small filled triangle centered at `at`, tip pointing from `tangentFrom`
+ * toward `tangentTo`, sized to `lengthM` in real-world meters. */
+function buildArrowTriangle(
+  tangentFrom: Coordinate3D,
+  tangentTo: Coordinate3D,
+  at: Coordinate3D,
+  lengthM: number,
+): [Coordinate3D, Coordinate3D, Coordinate3D] {
+  const [fromLon, fromLat] = tangentFrom;
+  const [toLon, toLat] = tangentTo;
+  const midLat = (fromLat + toLat) / 2;
+  const metersPerDegLon = METERS_PER_DEG_LAT * Math.cos((midLat * Math.PI) / 180);
+
+  const dxM = (toLon - fromLon) * metersPerDegLon;
+  const dyM = (toLat - fromLat) * METERS_PER_DEG_LAT;
+  const dirLengthM = Math.hypot(dxM, dyM) || 1;
+  const uxM = dxM / dirLengthM;
+  const uyM = dyM / dirLengthM;
+  // Perpendicular to (uxM, uyM).
+  const pxM = -uyM;
+  const pyM = uxM;
+
+  const halfLenM = lengthM / 2;
+  const halfWidthM = (lengthM * ARROW_WIDTH_RATIO) / 2;
+  const backXM = -uxM * halfLenM;
+  const backYM = -uyM * halfLenM;
+
+  return [
+    offsetMeters(at, uxM * halfLenM, uyM * halfLenM, metersPerDegLon),
+    offsetMeters(at, backXM + pxM * halfWidthM, backYM + pyM * halfWidthM, metersPerDegLon),
+    offsetMeters(at, backXM - pxM * halfWidthM, backYM - pyM * halfWidthM, metersPerDegLon),
+  ];
 }
 
-// A flat white triangle, tip at the top of its square viewBox. mask: true
-// means only this image's alpha channel is used for shape -- getColor
-// fully supplies the RGB per-instance, so this one icon covers every SNR
-// color (see colorForSnr) without needing per-color variants.
-const ARROW_ICON: ArrowIconDef = {
-  url: buildArrowIconDataUrl(ARROW_ICON_TEXTURE_PX),
-  id: "meshatlas-arrow",
-  width: ARROW_ICON_TEXTURE_PX,
-  height: ARROW_ICON_TEXTURE_PX,
-  mask: true,
-};
-
-function normalizeAngleDeg(deg: number): number {
-  return ((deg % 360) + 360) % 360;
+function offsetMeters([lon, lat, alt]: Coordinate3D, xM: number, yM: number, metersPerDegLon: number): Coordinate3D {
+  return [lon + xM / metersPerDegLon, lat + yM / METERS_PER_DEG_LAT, alt];
 }
 
 /** A link plus everything derived from comparing it against any reverse
@@ -116,13 +141,10 @@ interface RenderableLink {
   path: Coordinate3D[];
   arrowAt: Coordinate3D;
   // Two nearby points along the path, in the direction of travel, used to
-  // derive the arrow's on-screen rotation (see getArrowAngle) -- not a
-  // compass bearing, because a compass bearing can't be turned into a
-  // screen angle by a simple map-bearing subtraction once the camera is
-  // pitched: ground-plane perspective projection isn't angle-preserving,
-  // so a link's projected screen direction depends on pitch as well as
-  // bearing. Projecting these two actual world points and measuring the
-  // resulting screen-space delta sidesteps that entirely.
+  // orient the arrow triangle (see buildArrowTriangle) -- building the
+  // arrow from these same world points, rather than from an independently
+  // computed rotation, is what keeps it visually locked to the line's own
+  // on-screen direction (see the comment above ARROW_LENGTH_HEARD_DIRECT_PX).
   arrowTangentFrom: Coordinate3D;
   arrowTangentTo: Coordinate3D;
 }
@@ -133,12 +155,11 @@ export class LinksLayer {
   private readonly links = new Map<number, LinkFeature>();
   private renderable: RenderableLink[] = [];
   // Bumped every renderLayers() call and fed into the arrow layer's
-  // getAngle updateTrigger -- the projected screen angle depends on the
-  // map's *entire* camera transform (pan/zoom/bearing/pitch all affect
-  // the projection, see arrowTangentFrom/To's doc comment), so rather
-  // than tracking which specific camera fields changed, every
-  // renderLayers() call is treated as a potential angle change.
-  private angleRevision = 0;
+  // getPolygon updateTrigger -- the arrow's meters-size depends on the
+  // map's current zoom (see metersPerPixel), which can change on any
+  // camera move, so every renderLayers() call is treated as a potential
+  // size change rather than tracking zoom specifically.
+  private sizeRevision = 0;
 
   // Stable references so deck.gl's accessor-identity check only recomputes
   // GPU attributes flagged by updateTriggers, not everything, when
@@ -147,25 +168,18 @@ export class LinksLayer {
   private readonly getLinkColor = (r: RenderableLink) => colorForSnr(r.feature.properties.snr);
   private readonly getLinkWidth = (r: RenderableLink) =>
     r.feature.properties.link_type === "heard_direct" ? 3 : 2;
-  private readonly getArrowPosition = (r: RenderableLink) => r.arrowAt;
   private readonly getArrowColor = (r: RenderableLink) => colorForSnr(r.feature.properties.snr);
-  private readonly getArrowSize = (r: RenderableLink) =>
-    r.feature.properties.link_type === "heard_direct" ? ARROW_SIZE_HEARD_DIRECT_PX : ARROW_SIZE_RELAYED_PX;
-  // Billboard icon rotation is purely in screen space, with no built-in
-  // awareness of the map's camera -- so the angle has to be derived from
-  // actually projecting two nearby world points along the link's
-  // direction of travel and reading off the resulting on-screen delta,
-  // rather than from the link's compass bearing (see arrowTangentFrom/To's
-  // doc comment for why a bearing-based formula doesn't hold up once the
-  // camera is pitched).
-  private readonly getArrowAngle = (r: RenderableLink): number => {
-    const from = this.map.project([r.arrowTangentFrom[0], r.arrowTangentFrom[1]]);
-    const to = this.map.project([r.arrowTangentTo[0], r.arrowTangentTo[1]]);
-    // Screen space has y growing downward, so "up" is -y; this is the
-    // clockwise-from-up angle matching IconLayer's getAngle convention.
-    return normalizeAngleDeg((Math.atan2(to.x - from.x, -(to.y - from.y)) * 180) / Math.PI);
+  // Re-derives the triangle's real-world size from the current zoom (and
+  // the arrow's own latitude, since Web Mercator ground resolution varies
+  // with latitude) every time this runs, so the on-screen size stays
+  // constant as the user zooms -- see the comment above
+  // ARROW_LENGTH_HEARD_DIRECT_PX for why this is geometry rather than a
+  // billboarded icon.
+  private readonly getArrowPolygon = (r: RenderableLink): [Coordinate3D, Coordinate3D, Coordinate3D] => {
+    const sizePx = r.feature.properties.link_type === "heard_direct" ? ARROW_LENGTH_HEARD_DIRECT_PX : ARROW_LENGTH_RELAYED_PX;
+    const lengthM = clamp(sizePx * metersPerPixel(r.arrowAt[1], this.map.getZoom()), ARROW_LENGTH_MIN_M, ARROW_LENGTH_MAX_M);
+    return buildArrowTriangle(r.arrowTangentFrom, r.arrowTangentTo, r.arrowAt, lengthM);
   };
-  private readonly getArrowIcon = () => ARROW_ICON;
 
   /** One instance covers every RF system's links: each feature already
    * carries `properties.system_id`, and (per app/db.py) a link's two ends
@@ -174,9 +188,9 @@ export class LinksLayer {
   constructor(overlay: DeckOverlay, map: MapLibreMap) {
     this.overlay = overlay;
     this.map = map;
-    // "move" (not just "rotate") because arrow angle now comes from
-    // reprojecting world points, which shifts under any camera change --
-    // pan/zoom/rotate/pitch all fire "move".
+    // "move" covers pan/zoom/rotate/pitch -- the arrow's size depends on
+    // zoom (see getArrowPolygon), so it needs to be recomputed on any of
+    // them, not just zoom specifically.
     map.on("move", () => this.renderLayers());
   }
 
@@ -220,7 +234,7 @@ export class LinksLayer {
    * bearing/pitch all changed) so arrow angles keep tracking the camera. */
   private renderLayers(): void {
     const renderable = this.renderable;
-    this.angleRevision++;
+    this.sizeRevision++;
 
     this.overlay.setLayers([
       new PathLayer<RenderableLink>({
@@ -253,23 +267,16 @@ export class LinksLayer {
           getWidth: [renderable.length],
         },
       }),
-      new IconLayer<RenderableLink>({
+      new SolidPolygonLayer<RenderableLink>({
         id: "meshatlas-links-arrows",
         data: renderable,
         pickable: false,
-        billboard: true,
-        sizeUnits: "pixels",
         parameters: { depthCompare: "always", depthWriteEnabled: false },
-        getPosition: this.getArrowPosition,
-        getIcon: this.getArrowIcon,
-        getColor: this.getArrowColor,
-        getSize: this.getArrowSize,
-        getAngle: this.getArrowAngle,
+        getPolygon: this.getArrowPolygon,
+        getFillColor: this.getArrowColor,
         updateTriggers: {
-          getPosition: [renderable.length],
-          getColor: [renderable.length],
-          getSize: [renderable.length],
-          getAngle: [this.angleRevision],
+          getPolygon: [renderable.length, this.sizeRevision],
+          getFillColor: [renderable.length],
         },
       }),
     ]);

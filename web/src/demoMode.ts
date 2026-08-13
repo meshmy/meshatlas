@@ -9,20 +9,13 @@ const DEMO_ZOOM = 15;
 // horizon during flight, per the "low enough angle to see the horizon"
 // requirement.
 const DEMO_PITCH = 70;
-// Per-hop choreography: hold on the current node with its popup open while
-// the camera slowly rotates to face the next hop, then swap to the next
-// node's popup and fly there. Both legs are the same duration so the
-// rhythm stays even regardless of hop distance.
+// Per-hop choreography: hold on the current node with its popup open for
+// the full rotate -- that's the reading time for the popup -- then hide
+// it and fly to the next node with no popup showing, only opening the new
+// one once the camera has actually landed.
 const STATIC_DURATION_MS = 10_000;
 const FLY_DURATION_MS = 10_000;
 const INITIAL_FLY_MS = 3000;
-// How much earlier than STATIC_DURATION_MS's nominal end to cut the
-// rotate-in-place easeTo short and start the fly leg. flyTo inherits
-// whatever bearing the rotate left the camera at and re-targets the same
-// final bearing, so the last sliver of turning gets folded into the fly's
-// own bearing interpolation instead of the two legs visibly meeting at a
-// dead stop.
-const ROTATE_FLY_OVERLAP_MS = 1200;
 
 export interface DemoStatus {
   running: boolean;
@@ -55,6 +48,10 @@ export class DemoMode {
     private readonly getNodes: () => NodeFeature[],
     private readonly getLinks: () => LinkFeature[],
     private readonly onArrive: (feature: NodeFeature) => void,
+    // Called right as a fly leg starts, so the outgoing node's popup
+    // closes instead of staying open (mismatched with the camera) while
+    // the camera is in transit.
+    private readonly onDepart: () => void,
     private readonly onStatusChange: (status: DemoStatus) => void,
   ) {}
 
@@ -162,15 +159,12 @@ export class DemoMode {
         const bearing = bearingBetween(coordsOf(from), coordsOf(to));
 
         this.map.easeTo({ bearing, duration: STATIC_DURATION_MS, easing: easeInOutCubic, essential: true });
-        await this.delay(STATIC_DURATION_MS - ROTATE_FLY_OVERLAP_MS);
+        await this.delay(STATIC_DURATION_MS);
         if (!this.isActive(generation)) return;
 
-        // Popup swap happens right at the rotate->fly handoff: announce()
-        // closes the outgoing node's popup and opens the incoming node's
-        // in one atomic call (openNodePopup() calls closePopup()
-        // internally), so both halves land together, at the moment the
-        // camera starts moving toward `to`.
-        this.announce(to);
+        // Popup closes as the fly leg starts -- no node is "current" while
+        // the camera's in transit, so nothing should be shown until arrival.
+        this.onDepart();
 
         this.map.flyTo({
           center: coordsOf(to),
@@ -187,6 +181,7 @@ export class DemoMode {
 
         current = path[i];
         visited.add(current);
+        this.announce(to);
       }
     }
     this.stop();

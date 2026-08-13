@@ -164,6 +164,7 @@ map.on("load", () => {
       () => nodesLayer!.visible(),
       () => [...allLinks.values()],
       demoOnArrive,
+      closePopup,
       handleDemoStatus,
     );
     resolveLayersReady();

@@ -9,6 +9,7 @@
   --good: #3ecf6a;
   --weak: #e0553c;
   --unknown: #78828c;
+  --popup-fade-ms: 1000ms;
 }
 
 * {
@@ -108,7 +109,7 @@ body {
   cursor: pointer;
 }
 
-#demo-toggle {
+#tour-toggle {
   width: 100%;
   padding: 6px;
   background: var(--accent);
@@ -119,7 +120,7 @@ body {
   cursor: pointer;
 }
 
-#demo-status {
+#tour-status {
   margin: 6px 0 0;
 }
 
@@ -188,16 +189,13 @@ body {
   margin: 0 0 6px;
 }
 
-/* Fade-in duration (leaving .node-popup-hidden) -- keep in sync with
-   main.ts's openNodePopup() fade-in comment. */
+/* Fade in/out duration -- keep in sync with main.ts's POPUP_FADE_MS. */
 .node-popup {
   opacity: 1;
-  transition: opacity 500ms ease-in-out;
+  transition: opacity var(--popup-fade-ms) ease-in-out;
 }
 
-/* Fade-out duration (entering .node-popup-hidden) -- keep in sync with
-   main.ts's POPUP_FADE_OUT_MS. */
 .node-popup.node-popup-hidden {
   opacity: 0;
-  transition: opacity 1000ms ease-in-out;
+  transition: opacity var(--popup-fade-ms) ease-in-out;
 }

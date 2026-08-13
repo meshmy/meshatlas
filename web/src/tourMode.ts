@@ -3,12 +3,12 @@ import type { LinkFeature, NodeFeature } from "./types";
 
 // Deliberately close/low: this is a cinematic "flying low over the mesh"
 // camera, not the inspection view flyToNode() uses elsewhere in main.ts.
-const DEMO_ZOOM = 15;
+const TOUR_ZOOM = 15;
 // mapSetup's maxPitch is 85 -- staying a little under that keeps some
 // headroom while still tilting far enough toward horizontal to show the
 // horizon during flight, per the "low enough angle to see the horizon"
 // requirement.
-const DEMO_PITCH = 70;
+const TOUR_PITCH = 70;
 // Per-hop choreography: hold on the current node with its popup open for
 // the full rotate -- that's the reading time for the popup -- then hide
 // it and fly to the next node with no popup showing, only opening the new
@@ -26,13 +26,13 @@ const MAX_FLY_DURATION_MS = 10_000;
 // MapLibre's flyTo() zooms out mid-flight for a cinematic "rise" before
 // zooming back in, scaled by this curve (1.42 default -- "a high value
 // maximizes zooming for an exaggerated animation"; 1 is "circular
-// motion"). At DEMO_ZOOM/the default curve, longer hops rise enough to
+// motion"). At TOUR_ZOOM/the default curve, longer hops rise enough to
 // dip below the 3D buildings layer's minzoom (12, see mapSetup.ts) and
 // buildings visibly vanish mid-flight. A flatter curve keeps the dip
 // shallow enough to stay above that threshold.
 const FLY_CURVE = 0.6;
 
-export interface DemoStatus {
+export interface TourStatus {
   running: boolean;
   label: string | null;
 }
@@ -52,7 +52,7 @@ interface Graph {
  * they're skipped rather than given their own stop. The playlist only
  * reshuffles and starts repeating once every eligible node has had its
  * own stop. */
-export class DemoMode {
+export class TourMode {
   private running = false;
   private generation = 0;
   private timer: number | undefined;
@@ -71,7 +71,7 @@ export class DemoMode {
     // closes instead of staying open (mismatched with the camera) while
     // the camera is in transit.
     private readonly onDepart: () => void,
-    private readonly onStatusChange: (status: DemoStatus) => void,
+    private readonly onStatusChange: (status: TourStatus) => void,
   ) {}
 
   isRunning(): boolean {
@@ -96,7 +96,7 @@ export class DemoMode {
     this.generation++;
     window.clearTimeout(this.timer);
     // Cancels whatever easeTo/flyTo is mid-flight so the camera doesn't
-    // keep drifting toward the demo's last target after the user's asked
+    // keep drifting toward the tour's last target after the user's asked
     // to stop.
     this.map.stop();
     this.pendingResolve?.();
@@ -124,6 +124,17 @@ export class DemoMode {
     this.onStatusChange({ running: true, label: p.short_name || p.display_name || p.native_id });
   }
 
+  /** Holds on the last node of a playlist cycle for the same reading time
+   * every other node incidentally gets from the next hop's rotate step
+   * (see STATIC_DURATION_MS), then explicitly closes its popup -- since
+   * there's no next hop immediately following to do that via onDepart()
+   * before departing, unlike the regular per-hop choreography in run(). */
+  private async pauseThenDepart(generation: number): Promise<void> {
+    await this.delay(STATIC_DURATION_MS);
+    if (!this.isActive(generation)) return;
+    this.onDepart();
+  }
+
   /** Gets the camera into position on `feature` (no rotation -- the first
    * hop of whatever leg runs next takes care of that) and opens its info
    * popup. Used for the very first node of a tour, and for playlist
@@ -140,8 +151,8 @@ export class DemoMode {
     const duration = flyDurationFor([center.lng, center.lat], target);
     this.map.flyTo({
       center: target,
-      zoom: DEMO_ZOOM,
-      pitch: DEMO_PITCH,
+      zoom: TOUR_ZOOM,
+      pitch: TOUR_PITCH,
       duration,
       curve: FLY_CURVE,
       easing: easeInOutSine,
@@ -179,6 +190,11 @@ export class DemoMode {
       }
 
       const target = playlist[playlistIndex++];
+      // Whether `target` is the last item of the current shuffled playlist
+      // -- once reached, the loop reshuffles on its next pass. Read before
+      // that reshuffle can reset playlistIndex, so it reflects this pass's
+      // target rather than whatever comes after.
+      const isLastOfCycle = playlistIndex >= playlist.length;
       // Already reached as a pass-through hop earlier this cycle, or
       // dropped out of the live/filtered node set since the playlist was
       // drawn -- either way, nothing to do, move on to the next entry.
@@ -191,6 +207,8 @@ export class DemoMode {
         current = target;
         touched.add(current);
         await this.arriveAtFresh(graph.nodesById.get(current)!, generation);
+        if (isLastOfCycle && this.isActive(generation)) await this.pauseThenDepart(generation);
+        if (!this.isActive(generation)) return;
         continue;
       }
 
@@ -216,8 +234,8 @@ export class DemoMode {
         const flyDuration = flyDurationFor(coordsOf(from), coordsOf(to));
         this.map.flyTo({
           center: coordsOf(to),
-          zoom: DEMO_ZOOM,
-          pitch: DEMO_PITCH,
+          zoom: TOUR_ZOOM,
+          pitch: TOUR_PITCH,
           bearing,
           duration: flyDuration,
           curve: FLY_CURVE,
@@ -232,6 +250,8 @@ export class DemoMode {
         touched.add(current);
         this.announce(to);
       }
+      if (isLastOfCycle && this.isActive(generation)) await this.pauseThenDepart(generation);
+      if (!this.isActive(generation)) return;
     }
     this.stop();
   }

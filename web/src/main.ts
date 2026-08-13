@@ -2,7 +2,7 @@ import { LngLatBounds, Popup, type GeoJSONSource } from "maplibre-gl";
 import { connectLiveFeed, getLinks, getNodeHistory, getNodes, getSystems } from "./api";
 import { createMap, setBuildingExaggeration, setBuildingRenderDistance, setTerrainExaggeration } from "./mapSetup";
 import { DeckOverlay } from "./deckOverlay";
-import { DemoMode, type DemoStatus } from "./demoMode";
+import { TourMode, type TourStatus } from "./tourMode";
 import { LinksLayer } from "./linksLayer";
 import { NodesLayer, type NodeStatus } from "./nodesLayer";
 import { dispatchRestored, restoreAll, restoreControl, watchAndPersist } from "./sidebarSettings";
@@ -40,8 +40,9 @@ const statusCheckboxes: Record<NodeStatus, HTMLInputElement> = {
 const systemsList = requireElement<HTMLElement>("systems-list");
 const regionFilterSelect = requireElement<HTMLSelectElement>("region-filter");
 const statusEl = requireElement<HTMLElement>("status");
-const demoToggleButton = requireElement<HTMLButtonElement>("demo-toggle");
-const demoStatusEl = requireElement<HTMLElement>("demo-status");
+const tourToggleButton = requireElement<HTMLButtonElement>("tour-toggle");
+const tourToggleIcon = requireElement<HTMLElement>("tour-toggle-icon");
+const tourStatusEl = requireElement<HTMLElement>("tour-status");
 
 // Sidebar settings persistence: every id'd control in #panel is saved to
 // localStorage on change and restored on load, with no per-control list to
@@ -58,7 +59,7 @@ watchAndPersist(panelEl);
 
 let nodesLayer: NodesLayer | null = null;
 let linksLayer: LinksLayer | null = null;
-let demoMode: DemoMode | null = null;
+let tourMode: TourMode | null = null;
 let selectedNativeId: string | null = null;
 let hoveredNativeId: string | null = null;
 // Whether populateRegionDropdown() has run its one-time "preselect
@@ -127,14 +128,14 @@ const loadTimeout = window.setTimeout(() => {
   statusEl.textContent = "still waiting on the basemap (slow/unreachable tile CDN?)";
 }, 10_000);
 
-// Demo mode drives the camera itself (see demoMode.ts) -- if the user takes
+// Tour mode drives the camera itself (see tourMode.ts) -- if the user takes
 // the wheel (drag/scroll/rotate/pitch-drag), it should give way rather than
 // keep fighting them for control. MapLibre tags user-gesture events with
-// `originalEvent`; the same events fired programmatically (by DemoMode's own
+// `originalEvent`; the same events fired programmatically (by TourMode's own
 // flyTo/easeTo calls) have it unset.
 for (const eventName of ["dragstart", "zoomstart", "rotatestart", "pitchstart"] as const) {
   map.on(eventName, (event) => {
-    if (event.originalEvent) demoMode?.stop();
+    if (event.originalEvent) tourMode?.stop();
   });
 }
 
@@ -157,7 +158,7 @@ map.on("load", () => {
     });
 
     nodesLayer.onNodeClick((feature) => {
-      demoMode?.stop();
+      tourMode?.stop();
       selectNode(feature.properties.native_id, feature);
     });
     nodesLayer.onNodeHover((feature) => {
@@ -171,15 +172,15 @@ map.on("load", () => {
     // data here keeps line endpoints matched to where node markers render.
     map.on("idle", () => linksLayer?.refreshHeights());
 
-    demoMode = new DemoMode(
+    tourMode = new TourMode(
       map,
       // Only nodes actually on screen right now (system/status/region
       // filters all applied) -- see NodesLayer.visible().
       () => nodesLayer!.visible(),
       () => [...allLinks.values()],
-      demoOnArrive,
+      tourOnArrive,
       closePopup,
-      handleDemoStatus,
+      handleTourStatus,
     );
     resolveLayersReady();
   } catch (err) {
@@ -252,15 +253,15 @@ for (const status of ALL_STATUSES) {
 regionFilterSelect.addEventListener("change", () => {
   void layersReady.then(() => nodesLayer!.setRegionFilter(regionFilterSelect.value || null));
 });
-demoToggleButton.addEventListener("click", () => {
-  if (!demoMode) return;
-  if (demoMode.isRunning()) {
-    demoMode.stop();
+tourToggleButton.addEventListener("click", () => {
+  if (!tourMode) return;
+  if (tourMode.isRunning()) {
+    tourMode.stop();
     return;
   }
   closePopup();
-  if (!demoMode.start()) {
-    demoStatusEl.textContent = "No node with neighbors to tour yet.";
+  if (!tourMode.start()) {
+    tourStatusEl.textContent = "No node with neighbors to tour yet.";
   }
 });
 
@@ -277,12 +278,12 @@ demoToggleButton.addEventListener("click", () => {
 // harmless redundant re-application.
 void layersReady.then(() => dispatchRestored(restoreAll(panelEl)));
 
-/** DemoMode's per-hop arrival callback -- mirrors the info-display half of
+/** TourMode's per-hop arrival callback -- mirrors the info-display half of
  * resolveSelection() (URL, link highlighting, popup, history trail) but
- * deliberately skips flyToNode(): DemoMode drives the camera itself with
+ * deliberately skips flyToNode(): TourMode drives the camera itself with
  * its own bearing/pitch choreography, so a second, unrelated flyTo here
  * would fight it. */
-function demoOnArrive(feature: NodeFeature): void {
+function tourOnArrive(feature: NodeFeature): void {
   selectedNativeId = feature.properties.native_id;
   const url = new URL(location.href);
   url.searchParams.set("node", selectedNativeId);
@@ -292,9 +293,29 @@ function demoOnArrive(feature: NodeFeature): void {
   void loadHistory(feature.properties.id);
 }
 
-function handleDemoStatus(status: DemoStatus): void {
-  demoToggleButton.textContent = status.running ? "Stop demo" : "Start demo";
-  demoStatusEl.textContent = status.running && status.label ? `Touring — at ${status.label}` : "";
+// Snapshot of "Always show all neighbor lines" from just before the tour
+// forced it on, so it can be restored once the tour stops. null means no
+// tour is currently forcing it (either never started, or already restored).
+let neighborLinksBeforeTour: boolean | null = null;
+
+function handleTourStatus(status: TourStatus): void {
+  tourToggleIcon.textContent = status.running ? "⏸" : "▶";
+  tourToggleButton.setAttribute("aria-pressed", String(status.running));
+  tourStatusEl.textContent = status.running && status.label ? `Touring — at ${status.label}` : "";
+
+  if (status.running) {
+    if (neighborLinksBeforeTour === null) {
+      neighborLinksBeforeTour = toggleShowAllLinks.checked;
+      toggleShowAllLinks.checked = true;
+      toggleShowAllLinks.disabled = true;
+      void applyLinkFilters();
+    }
+  } else if (neighborLinksBeforeTour !== null) {
+    toggleShowAllLinks.checked = neighborLinksBeforeTour;
+    toggleShowAllLinks.disabled = false;
+    neighborLinksBeforeTour = null;
+    void applyLinkFilters();
+  }
 }
 
 async function refreshAll(): Promise<void> {
@@ -542,24 +563,26 @@ function openNodePopup(feature: NodeFeature): void {
   popup.on("close", () => {
     if (activePopup === popup) {
       activePopup = null;
-      demoMode?.stop();
+      tourMode?.stop();
       selectNode(null, null);
     }
   });
   activePopup = popup;
 
-  // Fade in over 500ms (see style.css's .node-popup transition): start at
-  // opacity 0, then drop the class on the next frame so the browser has
-  // already painted the 0 state and the transition actually animates
-  // instead of jumping straight to opaque.
+  // Fade in over --popup-fade-ms (see style.css's .node-popup transition):
+  // start at opacity 0, force a synchronous reflow so the browser commits
+  // that hidden state, then drop the class so removing it is a genuine
+  // style change the transition actually animates -- a plain classList
+  // add-then-remove within the same task never renders the 0 state at all,
+  // so there'd be nothing to visibly transition from.
   const el = popup.getElement();
   el.classList.add("node-popup-hidden");
-  requestAnimationFrame(() => requestAnimationFrame(() => el.classList.remove("node-popup-hidden")));
+  void el.offsetHeight;
+  el.classList.remove("node-popup-hidden");
 }
 
-// Keep in sync with .node-popup.node-popup-hidden's transition-duration
-// in style.css.
-const POPUP_FADE_OUT_MS = 1000;
+// Keep in sync with --popup-fade-ms in style.css.
+const POPUP_FADE_MS = 1000;
 
 /** Nulls the reference before removing so the popup's own "close" handler
  * (above) sees activePopup !== itself and doesn't recurse back into
@@ -572,7 +595,7 @@ function closePopup(): void {
   const popup = activePopup;
   activePopup = null;
   popup.getElement().classList.add("node-popup-hidden");
-  window.setTimeout(() => popup.remove(), POPUP_FADE_OUT_MS);
+  window.setTimeout(() => popup.remove(), POPUP_FADE_MS);
 }
 
 function buildPopupContent(feature: NodeFeature): HTMLElement {

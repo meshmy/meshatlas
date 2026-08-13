@@ -172,7 +172,7 @@ export class NodesLayer {
 
   /** Nodes currently passing every visibility filter (system/status/
    * region) -- i.e. the ones actually drawn on the map right now. Used by
-   * DemoMode so it only tours what's on screen rather than the full
+   * TourMode so it only tours what's on screen rather than the full
    * unfiltered dataset. */
   visible(): NodeFeature[] {
     const now = Date.now();

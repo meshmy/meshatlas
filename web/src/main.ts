@@ -5,6 +5,7 @@ import { DeckOverlay } from "./deckOverlay";
 import { DemoMode, type DemoStatus } from "./demoMode";
 import { LinksLayer } from "./linksLayer";
 import { NodesLayer, type NodeStatus } from "./nodesLayer";
+import { dispatchRestored, restoreAll, restoreControl, watchAndPersist } from "./sidebarSettings";
 import { loadSavedViewport } from "./viewportPersistence";
 import "./style.css";
 import type { LinkFeature, LiveMessage, NodeFeature } from "./types";
@@ -41,6 +42,19 @@ const regionFilterSelect = requireElement<HTMLSelectElement>("region-filter");
 const statusEl = requireElement<HTMLElement>("status");
 const demoToggleButton = requireElement<HTMLButtonElement>("demo-toggle");
 const demoStatusEl = requireElement<HTMLElement>("demo-status");
+
+// Sidebar settings persistence: every id'd control in #panel is saved to
+// localStorage on change and restored on load, with no per-control list to
+// maintain -- see sidebarSettings.ts. This first pass restores raw
+// values/checked state before anything below reads them (the initial
+// refreshAll() fetch, applyStatusFilter(), etc.); watchAndPersist() then
+// covers every future change, including to controls added later (the
+// systems checklist). A second pass, after the map/region dropdown/systems
+// list are ready, re-fires each restored control's own change handling --
+// see the layersReady.then() call further down.
+const panelEl = requireElement<HTMLElement>("panel");
+restoreAll(panelEl);
+watchAndPersist(panelEl);
 
 let nodesLayer: NodesLayer | null = null;
 let linksLayer: LinksLayer | null = null;
@@ -250,6 +264,19 @@ demoToggleButton.addEventListener("click", () => {
   }
 });
 
+// Second restore pass (see the Step A comment above, near panelEl): now
+// that every listener above is registered *and* the map/terrain/buildings
+// have finished loading (layersReady), re-fire "input"/"change" on every
+// control that was actually restored from storage. This is what applies a
+// saved terrain/building slider value to the map (setTerrainExaggeration()
+// etc. no-op until the terrain/building layers exist) and a saved region
+// filter (its <option>s don't exist until populateRegionDropdown() has
+// run) -- restoreAll() here re-checks both against their now-current DOM
+// state rather than assuming Step A's attempt already stuck. Controls Step
+// A already applied successfully (hours, toggles, statuses...) just get a
+// harmless redundant re-application.
+void layersReady.then(() => dispatchRestored(restoreAll(panelEl)));
+
 /** DemoMode's per-hop arrival callback -- mirrors the info-display half of
  * resolveSelection() (URL, link highlighting, popup, history trail) but
  * deliberately skips flyToNode(): DemoMode drives the camera itself with
@@ -300,6 +327,7 @@ async function loadSystemsList(): Promise<void> {
     const checkbox = document.createElement("input");
     checkbox.type = "checkbox";
     checkbox.checked = true;
+    checkbox.id = `system-${system.id}`;
     checkbox.dataset.systemId = system.id;
     checkbox.addEventListener("change", () => {
       if (checkbox.checked) enabledSystems.add(system.id);
@@ -309,6 +337,10 @@ async function loadSystemsList(): Promise<void> {
     });
     label.append(checkbox, ` ${system.name}`);
     systemsList.append(label);
+    // Built dynamically, after GET /api/systems resolves, so the earlier
+    // restoreAll(panelEl) pass (Step A, at the top of the file) never saw
+    // this checkbox -- restore and apply its saved state here instead.
+    if (restoreControl(checkbox)) checkbox.dispatchEvent(new Event("change", { bubbles: true }));
   }
 }
 

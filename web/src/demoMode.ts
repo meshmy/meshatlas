@@ -10,12 +10,19 @@ const DEMO_ZOOM = 15;
 // requirement.
 const DEMO_PITCH = 70;
 // Per-hop choreography: hold on the current node with its popup open while
-// the camera slowly rotates to face the next hop, then fly there. Both
-// legs are the same duration so the rhythm stays even regardless of hop
-// distance.
+// the camera slowly rotates to face the next hop, then swap to the next
+// node's popup and fly there. Both legs are the same duration so the
+// rhythm stays even regardless of hop distance.
 const STATIC_DURATION_MS = 10_000;
 const FLY_DURATION_MS = 10_000;
 const INITIAL_FLY_MS = 3000;
+// How much earlier than STATIC_DURATION_MS's nominal end to cut the
+// rotate-in-place easeTo short and start the fly leg. flyTo inherits
+// whatever bearing the rotate left the camera at and re-targets the same
+// final bearing, so the last sliver of turning gets folded into the fly's
+// own bearing interpolation instead of the two legs visibly meeting at a
+// dead stop.
+const ROTATE_FLY_OVERLAP_MS = 1200;
 
 export interface DemoStatus {
   running: boolean;
@@ -154,9 +161,16 @@ export class DemoMode {
         const to = graph.nodesById.get(path[i])!;
         const bearing = bearingBetween(coordsOf(from), coordsOf(to));
 
-        this.map.easeTo({ bearing, duration: STATIC_DURATION_MS, essential: true });
-        await this.delay(STATIC_DURATION_MS);
+        this.map.easeTo({ bearing, duration: STATIC_DURATION_MS, easing: easeInOutCubic, essential: true });
+        await this.delay(STATIC_DURATION_MS - ROTATE_FLY_OVERLAP_MS);
         if (!this.isActive(generation)) return;
+
+        // Popup swap happens right at the rotate->fly handoff: announce()
+        // closes the outgoing node's popup and opens the incoming node's
+        // in one atomic call (openNodePopup() calls closePopup()
+        // internally), so both halves land together, at the moment the
+        // camera starts moving toward `to`.
+        this.announce(to);
 
         this.map.flyTo({
           center: coordsOf(to),
@@ -164,14 +178,15 @@ export class DemoMode {
           pitch: DEMO_PITCH,
           bearing,
           duration: FLY_DURATION_MS,
+          easing: easeInOutCubic,
           essential: true,
         });
+
         await this.delay(FLY_DURATION_MS);
         if (!this.isActive(generation)) return;
 
         current = path[i];
         visited.add(current);
-        this.announce(to);
       }
     }
     this.stop();
@@ -258,6 +273,14 @@ function computeNextPath(graph: Graph, current: string, visited: Set<string>): s
   }
   path.reverse();
   return path;
+}
+
+/** Standard ease-in-out cubic, t in 0..1. MapLibre's easeTo/flyTo both
+ * default to a CSS "ease"-style curve (cubic-bezier(0.25, 0.1, 0.25, 1)),
+ * whose nonzero start slope reads as a fairly brisk start next to a true
+ * standing start. */
+function easeInOutCubic(t: number): number {
+  return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
 }
 
 function coordsOf(feature: NodeFeature): [number, number] {

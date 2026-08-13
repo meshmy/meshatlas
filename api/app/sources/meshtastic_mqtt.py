@@ -16,9 +16,11 @@ Background on the wire format, for anyone maintaining this:
   PSK supplied via MESHTASTIC_CHANNEL_KEYS.
 - `Data.portnum` says what kind of application payload this is. We only
   care about a handful: NODEINFO_APP (name/hardware), POSITION_APP (GPS),
-  TELEMETRY_APP (battery/voltage) and NEIGHBORINFO_APP (self-reported
-  neighbor table) -- everything else (text messages, routing, admin, ...)
-  is ignored.
+  TELEMETRY_APP (battery/voltage), NEIGHBORINFO_APP (self-reported
+  neighbor table) and MAP_REPORT_APP (an opt-in periodic broadcast --
+  "Map Reporting" in the device config -- carrying the node's own
+  configured LoRa region, among other summary fields) -- everything else
+  (text messages, routing, admin, ...) is ignored.
 - Coverage/"who heard whom" edges come from two independent signals:
     1. `heard_direct`: when a packet's `relay_node` is 0 (unset), the
        packet reached the MQTT gateway with no intermediate relay, so
@@ -39,7 +41,7 @@ from datetime import datetime, timezone
 
 import paho.mqtt.client as mqtt
 from google.protobuf.message import DecodeError
-from meshtastic.protobuf import mesh_pb2, mqtt_pb2, portnums_pb2, telemetry_pb2
+from meshtastic.protobuf import config_pb2, mesh_pb2, mqtt_pb2, portnums_pb2, telemetry_pb2
 
 from . import register_source
 from .base import Event, LinkObservation, NodeUpdate, Sink, Source
@@ -72,6 +74,23 @@ def _is_json_topic(topic: str) -> bool:
     (the default MESHTASTIC_MQTT_TOPIC) picks up both, so this filters
     the JSON copies out before we waste a protobuf parse attempt on them."""
     return "json" in topic.split("/")
+
+
+def _region_from_topic(topic: str) -> str | None:
+    """Meshtastic MQTT topics follow `<root>/<region>/2/e/<channel>/<gateway>`
+    (e.g. `msh/MY_919/2/e/LongFast/!a1b2c3d4`) -- the segment right after the
+    root conventionally matches the LoRa region preset (frequency plan) the
+    publishing gateway is configured with. Every node able to talk to that
+    gateway over RF necessarily shares the same frequency plan, so this is a
+    usable proxy for which physical mesh/region a node belongs to.
+
+    It's a proxy, not authoritative, though: it's inferred from the topic
+    a gateway happens to publish on, not from anything the node itself
+    reports. `_decode_map_report` below gets the node's own configured
+    region straight from the protocol when one happens to be available;
+    this is the fallback for nodes that never send one."""
+    parts = topic.split("/")
+    return parts[1] if len(parts) > 1 and parts[1] else None
 
 
 @register_source("meshtastic")
@@ -111,7 +130,7 @@ class MeshtasticMqttSource(Source):
             if _is_json_topic(msg.topic):
                 return  # JSON-format duplicate of a topic we handle as protobuf; nothing to do
             try:
-                events = list(self._decode_message(msg.payload))
+                events = list(self._decode_message(msg.topic, msg.payload))
             except DecodeError:
                 # Expected background noise on a wildcard subscription --
                 # non-ServiceEnvelope traffic (map reports, stats, or
@@ -141,7 +160,7 @@ class MeshtasticMqttSource(Source):
 
     # -- decoding -----------------------------------------------------
 
-    def _decode_message(self, raw_payload: bytes) -> list[Event]:
+    def _decode_message(self, topic: str, raw_payload: bytes) -> list[Event]:
         envelope = mqtt_pb2.ServiceEnvelope()
         envelope.ParseFromString(raw_payload)  # raises if not a ServiceEnvelope; caught by caller
         packet = envelope.packet
@@ -161,8 +180,9 @@ class MeshtasticMqttSource(Source):
             else datetime.now(timezone.utc)
         )
         from_id = node_native_id(getattr(packet, "from"))
+        region = _region_from_topic(topic)
 
-        events: list[Event] = list(self._decode_payload(data, from_id, observed_at))
+        events: list[Event] = list(self._decode_payload(data, from_id, observed_at, region))
 
         # A packet that reached MQTT with no intermediate relay tells us,
         # independent of its payload type, that the uplinking gateway
@@ -194,20 +214,22 @@ class MeshtasticMqttSource(Source):
                 continue
         return None
 
-    def _decode_payload(self, data, from_id: str, observed_at: datetime) -> list[Event]:
+    def _decode_payload(self, data, from_id: str, observed_at: datetime, region: str | None) -> list[Event]:
         port = data.portnum
         if port == portnums_pb2.PortNum.NODEINFO_APP:
-            return self._decode_nodeinfo(data.payload, from_id, observed_at)
+            return self._decode_nodeinfo(data.payload, from_id, observed_at, region)
         if port == portnums_pb2.PortNum.POSITION_APP:
-            return self._decode_position(data.payload, from_id, observed_at)
+            return self._decode_position(data.payload, from_id, observed_at, region)
         if port == portnums_pb2.PortNum.TELEMETRY_APP:
-            return self._decode_telemetry(data.payload, from_id, observed_at)
+            return self._decode_telemetry(data.payload, from_id, observed_at, region)
         if port == portnums_pb2.PortNum.NEIGHBORINFO_APP:
             return self._decode_neighborinfo(data.payload, from_id, observed_at)
+        if port == portnums_pb2.PortNum.MAP_REPORT_APP:
+            return self._decode_map_report(data.payload, from_id, observed_at, region)
         return []
 
     @staticmethod
-    def _decode_nodeinfo(payload: bytes, from_id: str, observed_at: datetime) -> list[Event]:
+    def _decode_nodeinfo(payload: bytes, from_id: str, observed_at: datetime, region: str | None) -> list[Event]:
         user = mesh_pb2.User()
         user.ParseFromString(payload)
         hw_model = None
@@ -224,11 +246,12 @@ class MeshtasticMqttSource(Source):
                 display_name=user.long_name or None,
                 short_name=user.short_name or None,
                 hardware_model=hw_model,
+                region=region,
             )
         ]
 
     @staticmethod
-    def _decode_position(payload: bytes, from_id: str, observed_at: datetime) -> list[Event]:
+    def _decode_position(payload: bytes, from_id: str, observed_at: datetime, region: str | None) -> list[Event]:
         pos = mesh_pb2.Position()
         pos.ParseFromString(payload)
         if not pos.latitude_i and not pos.longitude_i:
@@ -241,11 +264,12 @@ class MeshtasticMqttSource(Source):
                 latitude=pos.latitude_i * 1e-7,
                 longitude=pos.longitude_i * 1e-7,
                 altitude_m=float(pos.altitude) if pos.altitude else None,
+                region=region,
             )
         ]
 
     @staticmethod
-    def _decode_telemetry(payload: bytes, from_id: str, observed_at: datetime) -> list[Event]:
+    def _decode_telemetry(payload: bytes, from_id: str, observed_at: datetime, region: str | None) -> list[Event]:
         telem = telemetry_pb2.Telemetry()
         telem.ParseFromString(payload)
         if not telem.HasField("device_metrics"):
@@ -258,6 +282,7 @@ class MeshtasticMqttSource(Source):
                 observed_at=observed_at,
                 battery_pct=dm.battery_level if dm.HasField("battery_level") else None,
                 voltage=dm.voltage if dm.HasField("voltage") else None,
+                region=region,
             )
         ]
 
@@ -279,4 +304,37 @@ class MeshtasticMqttSource(Source):
                 snr=neighbor.snr or None,
             )
             for neighbor in info.neighbors
+        ]
+
+    @staticmethod
+    def _decode_map_report(
+        payload: bytes, from_id: str, observed_at: datetime, topic_region: str | None
+    ) -> list[Event]:
+        """MapReport carries a node's own device-configured LoRa region
+        (`Config.LoRaConfig.RegionCode`) directly, rather than it being
+        inferred from which topic a gateway happened to relay the packet
+        on -- see the module docstring and `_region_from_topic`. Only sent
+        if the node has opted into "Map Reporting", and RegionCode 0 is
+        UNSET (not actually configured), so this falls back to the
+        topic-derived guess when the node hasn't reported one itself."""
+        report = mqtt_pb2.MapReport()
+        report.ParseFromString(payload)
+        resolved_region = None
+        if report.region:
+            try:
+                resolved_region = config_pb2.Config.LoRaConfig.RegionCode.Name(report.region)
+            except ValueError:
+                resolved_region = None
+        return [
+            NodeUpdate(
+                system_id="meshtastic",
+                native_id=from_id,
+                observed_at=observed_at,
+                region=resolved_region or topic_region,
+                # Only true when the node's own MapReport actually resolved
+                # to a region -- the topic-fallback case below is exactly
+                # as authoritative as any other topic-derived guess, i.e.
+                # not at all. See db.py::apply_node_update.
+                region_authoritative=resolved_region is not None,
+            )
         ]

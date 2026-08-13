@@ -23,9 +23,10 @@ export class NodesLayer {
   private hoveredId: string | null = null;
   private refreshTimer: number | undefined;
 
-  // null = "no restriction"; both default to showing everything.
+  // null = "no restriction"; all three default to showing everything.
   private visibleSystems: Set<string> | null = null;
   private visibleStatuses: Set<NodeStatus> = new Set(["fresh", "stale", "offline"]);
+  private visibleRegion: string | null = null;
 
   constructor(map: MapLibreMap) {
     this.map = map;
@@ -132,6 +133,22 @@ export class NodesLayer {
     this.applyFilter();
   }
 
+  /** `null` clears the restriction (show every region). */
+  setRegionFilter(region: string | null): void {
+    this.visibleRegion = region;
+    this.applyFilter();
+  }
+
+  /** Distinct, non-null `region` values across every currently loaded
+   * node, sorted -- used to populate the region filter dropdown. */
+  availableRegions(): string[] {
+    const regions = new Set<string>();
+    for (const feature of this.nodes.values()) {
+      if (feature.properties.region) regions.add(feature.properties.region);
+    }
+    return [...regions].sort();
+  }
+
   setAll(collection: FeatureCollection<NodeFeature>): void {
     this.nodes.clear();
     for (const feature of collection.features) {
@@ -147,6 +164,25 @@ export class NodesLayer {
 
   get(nodeId: string): NodeFeature | undefined {
     return this.nodes.get(nodeId);
+  }
+
+  all(): NodeFeature[] {
+    return [...this.nodes.values()];
+  }
+
+  /** Nodes currently passing every visibility filter (system/status/
+   * region) -- i.e. the ones actually drawn on the map right now. Used by
+   * DemoMode so it only tours what's on screen rather than the full
+   * unfiltered dataset. */
+  visible(): NodeFeature[] {
+    const now = Date.now();
+    return [...this.nodes.values()].filter((feature) => {
+      if (!hasGeometry(feature)) return false;
+      if (this.visibleSystems && !this.visibleSystems.has(feature.properties.system_id)) return false;
+      if (!this.visibleStatuses.has(statusFor(feature, now))) return false;
+      if (this.visibleRegion && feature.properties.region !== this.visibleRegion) return false;
+      return true;
+    });
   }
 
   findByNativeId(nativeId: string): NodeFeature | undefined {
@@ -195,6 +231,9 @@ export class NodesLayer {
       clauses.push(["in", ["get", "system_id"], ["literal", [...this.visibleSystems]]]);
     }
     clauses.push(["in", ["get", "status"], ["literal", [...this.visibleStatuses]]]);
+    if (this.visibleRegion) {
+      clauses.push(["==", ["get", "region"], this.visibleRegion]);
+    }
 
     const filter = ["all", ...clauses] as unknown as FilterSpecification;
     if (this.map.getLayer(CIRCLE_LAYER_ID)) this.map.setFilter(CIRCLE_LAYER_ID, filter);

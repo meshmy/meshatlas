@@ -13,6 +13,7 @@ from datetime import datetime
 from geoalchemy2 import Geography
 from sqlalchemy import (
     BigInteger,
+    Boolean,
     DateTime,
     Float,
     ForeignKey,
@@ -60,6 +61,22 @@ class Node(Base):
     display_name: Mapped[str | None] = mapped_column(String(256), nullable=True)
     short_name: Mapped[str | None] = mapped_column(String(32), nullable=True)
     hardware_model: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # LoRa region preset (e.g. "US", "EU_868", "MY_919") the node's mesh
+    # runs on. Best case this is the node's own device-configured region,
+    # from an opt-in MapReport packet -- see
+    # meshtastic_mqtt.py::_decode_map_report; otherwise it's inferred from
+    # the MQTT topic a node's packets arrive on -- see
+    # meshtastic_mqtt.py::_region_from_topic. Either way, every node on the
+    # same physical RF mesh shares one frequency plan, so this is a
+    # reliable proxy for "which mesh/geographic area is this node part of".
+    region: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # True once `region` was set from a node's own MapReport rather than
+    # guessed from the MQTT topic -- see apply_node_update in db.py, which
+    # uses this to stop later topic-derived guesses from clobbering an
+    # already-authoritative value (MapReport is opt-in and infrequent, so
+    # without this flag the much more frequent topic-derived writes from
+    # NodeInfo/Position/Telemetry packets would almost always win instead).
+    region_authoritative: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
 
     first_seen: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     last_seen: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

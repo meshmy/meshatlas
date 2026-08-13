@@ -2,7 +2,7 @@
 protocol-accurate) protobuf messages, so the MQTT parsing logic can be
 verified without a live broker or captured firmware traffic.
 """
-from meshtastic.protobuf import mesh_pb2, mqtt_pb2, portnums_pb2, telemetry_pb2
+from meshtastic.protobuf import config_pb2, mesh_pb2, mqtt_pb2, portnums_pb2, telemetry_pb2
 
 from app.config import MeshtasticConfig
 from app.sources.base import LinkObservation, NodeUpdate
@@ -10,6 +10,7 @@ from app.sources.crypto import DEFAULT_CHANNEL_KEY, decrypt
 from app.sources.meshtastic_mqtt import MeshtasticMqttSource, node_native_id
 
 CONFIG = MeshtasticConfig()
+TOPIC = "msh/MY_919/2/e/LongFast/!aaaaaaaa"
 
 
 def make_source() -> MeshtasticMqttSource:
@@ -30,7 +31,7 @@ def test_decodes_nodeinfo_packet():
     user = mesh_pb2.User(long_name="Test Node", short_name="TST", hw_model=1)
     packet = unencrypted_packet(0xDEADBEEF, portnums_pb2.PortNum.NODEINFO_APP, user.SerializeToString())
 
-    events = make_source()._decode_message(envelope_bytes(packet))
+    events = make_source()._decode_message(TOPIC, envelope_bytes(packet))
 
     node_events = [e for e in events if isinstance(e, NodeUpdate)]
     assert len(node_events) == 1
@@ -40,13 +41,24 @@ def test_decodes_nodeinfo_packet():
     assert update.display_name == "Test Node"
     assert update.short_name == "TST"
     assert update.hardware_model == "TLORA_V2"
+    assert update.region == "MY_919"
+
+
+def test_region_is_taken_from_second_topic_segment():
+    user = mesh_pb2.User(long_name="Other Region", short_name="OTH", hw_model=1)
+    packet = unencrypted_packet(0xABCDEF, portnums_pb2.PortNum.NODEINFO_APP, user.SerializeToString())
+
+    events = make_source()._decode_message("msh/EU_868/2/e/LongFast/!bbbbbbbb", envelope_bytes(packet))
+
+    update = next(e for e in events if isinstance(e, NodeUpdate))
+    assert update.region == "EU_868"
 
 
 def test_decodes_position_packet():
     pos = mesh_pb2.Position(latitude_i=int(1.23456 * 1e7), longitude_i=int(103.6543 * 1e7), altitude=42)
     packet = unencrypted_packet(0x1, portnums_pb2.PortNum.POSITION_APP, pos.SerializeToString())
 
-    events = make_source()._decode_message(envelope_bytes(packet))
+    events = make_source()._decode_message(TOPIC, envelope_bytes(packet))
 
     update = next(e for e in events if isinstance(e, NodeUpdate))
     assert round(update.latitude, 5) == 1.23456
@@ -60,7 +72,7 @@ def test_decodes_telemetry_packet():
     )
     packet = unencrypted_packet(0x2, portnums_pb2.PortNum.TELEMETRY_APP, telem.SerializeToString())
 
-    events = make_source()._decode_message(envelope_bytes(packet))
+    events = make_source()._decode_message(TOPIC, envelope_bytes(packet))
 
     update = next(e for e in events if isinstance(e, NodeUpdate))
     assert update.battery_pct == 87
@@ -77,7 +89,7 @@ def test_decodes_neighborinfo_as_link_observations():
     )
     packet = unencrypted_packet(0x10, portnums_pb2.PortNum.NEIGHBORINFO_APP, info.SerializeToString())
 
-    events = make_source()._decode_message(envelope_bytes(packet))
+    events = make_source()._decode_message(TOPIC, envelope_bytes(packet))
 
     links = [e for e in events if isinstance(e, LinkObservation) and e.link_type == "neighbor_report"]
     assert {(l.from_native_id, l.to_native_id, l.snr) for l in links} == {
@@ -99,7 +111,7 @@ def test_unrelayed_packet_emits_heard_direct_link_from_gateway():
         hop_limit=3,
     )
 
-    events = make_source()._decode_message(envelope_bytes(packet, gateway_id="!AABBCCDD"))
+    events = make_source()._decode_message(TOPIC, envelope_bytes(packet, gateway_id="!AABBCCDD"))
 
     link = next(e for e in events if isinstance(e, LinkObservation) and e.link_type == "heard_direct")
     assert link.from_native_id == node_native_id(0x99)
@@ -118,7 +130,7 @@ def test_relayed_packet_does_not_emit_heard_direct_link():
         rx_snr=7.25,
     )
 
-    events = make_source()._decode_message(envelope_bytes(packet))
+    events = make_source()._decode_message(TOPIC, envelope_bytes(packet))
 
     assert not any(isinstance(e, LinkObservation) for e in events)
 
@@ -133,10 +145,49 @@ def test_decrypts_default_channel_traffic():
     ciphertext = decrypt(plaintext, DEFAULT_CHANNEL_KEY, packet_id, from_node)
     packet = mesh_pb2.MeshPacket(**{"from": from_node}, id=packet_id, encrypted=ciphertext)
 
-    events = make_source()._decode_message(envelope_bytes(packet))
+    events = make_source()._decode_message(TOPIC, envelope_bytes(packet))
 
     update = next(e for e in events if isinstance(e, NodeUpdate))
     assert update.display_name == "Encrypted Node"
+
+
+def test_map_report_region_overrides_topic_guess():
+    report = mqtt_pb2.MapReport(
+        long_name="Reporter", short_name="RPT", region=config_pb2.Config.LoRaConfig.RegionCode.SG_923
+    )
+    packet = unencrypted_packet(0x55, portnums_pb2.PortNum.MAP_REPORT_APP, report.SerializeToString())
+
+    # Topic says MY_919, but the node's own MapReport says SG_923 -- the
+    # self-reported value should win.
+    events = make_source()._decode_message(TOPIC, envelope_bytes(packet))
+
+    update = next(e for e in events if isinstance(e, NodeUpdate))
+    assert update.region == "SG_923"
+    assert update.region_authoritative is True
+
+
+def test_map_report_falls_back_to_topic_region_when_unset():
+    report = mqtt_pb2.MapReport(long_name="Reporter", short_name="RPT")  # region left UNSET
+    packet = unencrypted_packet(0x56, portnums_pb2.PortNum.MAP_REPORT_APP, report.SerializeToString())
+
+    events = make_source()._decode_message(TOPIC, envelope_bytes(packet))
+
+    update = next(e for e in events if isinstance(e, NodeUpdate))
+    assert update.region == "MY_919"
+    # Falling back to the topic guess is exactly as unauthoritative as any
+    # other topic-derived region -- db.py::apply_node_update relies on this
+    # to know it's safe to be overwritten later.
+    assert update.region_authoritative is False
+
+
+def test_nodeinfo_region_is_not_authoritative():
+    user = mesh_pb2.User(long_name="Test Node", short_name="TST", hw_model=1)
+    packet = unencrypted_packet(0xDEADBEEF, portnums_pb2.PortNum.NODEINFO_APP, user.SerializeToString())
+
+    events = make_source()._decode_message(TOPIC, envelope_bytes(packet))
+
+    update = next(e for e in events if isinstance(e, NodeUpdate))
+    assert update.region_authoritative is False
 
 
 def test_unknown_channel_key_is_silently_ignored():
@@ -144,6 +195,6 @@ def test_unknown_channel_key_is_silently_ignored():
     ciphertext = decrypt(plaintext, b"\x00" * 16, 1, 1)
     packet = mesh_pb2.MeshPacket(**{"from": 1}, id=1, encrypted=ciphertext)
 
-    events = make_source()._decode_message(envelope_bytes(packet))
+    events = make_source()._decode_message(TOPIC, envelope_bytes(packet))
 
     assert events == []

@@ -2,6 +2,7 @@ import { LngLatBounds, Popup, type GeoJSONSource } from "maplibre-gl";
 import { connectLiveFeed, getLinks, getNodeHistory, getNodes, getSystems } from "./api";
 import { createMap, setBuildingExaggeration, setBuildingRenderDistance, setTerrainExaggeration } from "./mapSetup";
 import { DeckOverlay } from "./deckOverlay";
+import { DemoMode, type DemoStatus } from "./demoMode";
 import { LinksLayer } from "./linksLayer";
 import { NodesLayer, type NodeStatus } from "./nodesLayer";
 import { loadSavedViewport } from "./viewportPersistence";
@@ -11,6 +12,9 @@ import type { LinkFeature, LiveMessage, NodeFeature } from "./types";
 const HISTORY_SOURCE_ID = "meshatlas-history";
 const HISTORY_LAYER_ID = "meshatlas-history-line";
 const ALL_STATUSES: NodeStatus[] = ["fresh", "stale", "offline"];
+// Preselected in the region dropdown the first time it's populated, if
+// present in the loaded data -- see populateRegionDropdown().
+const DEFAULT_REGION = "MY_919";
 
 const mapContainer = document.getElementById("map");
 if (!mapContainer) throw new Error("missing #map container");
@@ -33,12 +37,20 @@ const statusCheckboxes: Record<NodeStatus, HTMLInputElement> = {
   offline: requireElement<HTMLInputElement>("status-offline"),
 };
 const systemsList = requireElement<HTMLElement>("systems-list");
+const regionFilterSelect = requireElement<HTMLSelectElement>("region-filter");
 const statusEl = requireElement<HTMLElement>("status");
+const demoToggleButton = requireElement<HTMLButtonElement>("demo-toggle");
+const demoStatusEl = requireElement<HTMLElement>("demo-status");
 
 let nodesLayer: NodesLayer | null = null;
 let linksLayer: LinksLayer | null = null;
+let demoMode: DemoMode | null = null;
 let selectedNativeId: string | null = null;
 let hoveredNativeId: string | null = null;
+// Whether populateRegionDropdown() has run its one-time "preselect
+// DEFAULT_REGION" step yet -- see that function for why this only fires
+// once rather than on every node refresh.
+let regionFilterDefaulted = false;
 let activePopup: Popup | null = null;
 // The full set of links last fetched for the current `hours` window,
 // keyed by id -- server-side filtering used to also narrow this to just
@@ -101,6 +113,17 @@ const loadTimeout = window.setTimeout(() => {
   statusEl.textContent = "still waiting on the basemap (slow/unreachable tile CDN?)";
 }, 10_000);
 
+// Demo mode drives the camera itself (see demoMode.ts) -- if the user takes
+// the wheel (drag/scroll/rotate/pitch-drag), it should give way rather than
+// keep fighting them for control. MapLibre tags user-gesture events with
+// `originalEvent`; the same events fired programmatically (by DemoMode's own
+// flyTo/easeTo calls) have it unset.
+for (const eventName of ["dragstart", "zoomstart", "rotatestart", "pitchstart"] as const) {
+  map.on(eventName, (event) => {
+    if (event.originalEvent) demoMode?.stop();
+  });
+}
+
 map.on("load", () => {
   window.clearTimeout(loadTimeout);
   try {
@@ -119,7 +142,10 @@ map.on("load", () => {
       },
     });
 
-    nodesLayer.onNodeClick((feature) => selectNode(feature.properties.native_id, feature));
+    nodesLayer.onNodeClick((feature) => {
+      demoMode?.stop();
+      selectNode(feature.properties.native_id, feature);
+    });
     nodesLayer.onNodeHover((feature) => {
       hoveredNativeId = feature?.properties.native_id ?? null;
       void applyLinkFilters();
@@ -130,6 +156,16 @@ map.on("load", () => {
     // such change, so re-running the link render against already-cached
     // data here keeps line endpoints matched to where node markers render.
     map.on("idle", () => linksLayer?.refreshHeights());
+
+    demoMode = new DemoMode(
+      map,
+      // Only nodes actually on screen right now (system/status/region
+      // filters all applied) -- see NodesLayer.visible().
+      () => nodesLayer!.visible(),
+      () => [...allLinks.values()],
+      demoOnArrive,
+      handleDemoStatus,
+    );
     resolveLayersReady();
   } catch (err) {
     console.error("meshatlas: failed to initialize map layers", err);
@@ -198,6 +234,40 @@ toggleShowAllLinks.addEventListener("change", () => void applyLinkFilters());
 for (const status of ALL_STATUSES) {
   statusCheckboxes[status].addEventListener("change", () => void applyStatusFilter());
 }
+regionFilterSelect.addEventListener("change", () => {
+  void layersReady.then(() => nodesLayer!.setRegionFilter(regionFilterSelect.value || null));
+});
+demoToggleButton.addEventListener("click", () => {
+  if (!demoMode) return;
+  if (demoMode.isRunning()) {
+    demoMode.stop();
+    return;
+  }
+  closePopup();
+  if (!demoMode.start()) {
+    demoStatusEl.textContent = "No node with neighbors to tour yet.";
+  }
+});
+
+/** DemoMode's per-hop arrival callback -- mirrors the info-display half of
+ * resolveSelection() (URL, link highlighting, popup, history trail) but
+ * deliberately skips flyToNode(): DemoMode drives the camera itself with
+ * its own bearing/pitch choreography, so a second, unrelated flyTo here
+ * would fight it. */
+function demoOnArrive(feature: NodeFeature): void {
+  selectedNativeId = feature.properties.native_id;
+  const url = new URL(location.href);
+  url.searchParams.set("node", selectedNativeId);
+  history.replaceState(null, "", url);
+  void applyLinkFilters();
+  openNodePopup(feature);
+  void loadHistory(feature.properties.id);
+}
+
+function handleDemoStatus(status: DemoStatus): void {
+  demoToggleButton.textContent = status.running ? "Stop demo" : "Start demo";
+  demoStatusEl.textContent = status.running && status.label ? `Touring — at ${status.label}` : "";
+}
 
 async function refreshAll(): Promise<void> {
   await Promise.all([refreshNodes(), refreshLinks()]);
@@ -247,6 +317,41 @@ async function applyStatusFilter(): Promise<void> {
   nodesLayer!.setStatusFilter(visible);
 }
 
+/** Rebuilds the region dropdown's options from whatever regions are
+ * actually present in the currently loaded nodes (there's no fixed
+ * backend list of regions the way there is for systems -- see
+ * loadSystemsList() -- since a region is just whatever string a node's
+ * MQTT topic happened to carry). Preselects DEFAULT_REGION exactly once,
+ * the first time a region list is available; after that the user's own
+ * selection is preserved across refreshes as long as it's still a region
+ * some loaded node actually has, falling back to "All regions" if not. */
+function populateRegionDropdown(): void {
+  const regions = nodesLayer!.availableRegions();
+  const previousValue = regionFilterSelect.value;
+
+  regionFilterSelect.innerHTML = "";
+  const allOption = document.createElement("option");
+  allOption.value = "";
+  allOption.textContent = "All regions";
+  regionFilterSelect.append(allOption);
+  for (const region of regions) {
+    const option = document.createElement("option");
+    option.value = region;
+    option.textContent = region;
+    regionFilterSelect.append(option);
+  }
+
+  let nextValue = "";
+  if (!regionFilterDefaulted) {
+    nextValue = regions.includes(DEFAULT_REGION) ? DEFAULT_REGION : "";
+    regionFilterDefaulted = true;
+  } else if (regions.includes(previousValue)) {
+    nextValue = previousValue;
+  }
+  regionFilterSelect.value = nextValue;
+  nodesLayer!.setRegionFilter(nextValue || null);
+}
+
 async function refreshNodes(): Promise<void> {
   // Fetch runs immediately; only the render step waits on the map layers.
   const activeHours = activeHoursSelect.value ? Number(activeHoursSelect.value) : undefined;
@@ -254,6 +359,7 @@ async function refreshNodes(): Promise<void> {
   await layersReady;
   nodesLayer!.setAll(collection);
   await applyStatusFilter();
+  populateRegionDropdown();
   fitToNodesOnce(collection.features);
   // refreshNodes() and refreshLinks() run in parallel from refreshAll()
   // with no ordering guarantee -- if links finish filtering first,
@@ -403,6 +509,7 @@ function openNodePopup(feature: NodeFeature): void {
   popup.on("close", () => {
     if (activePopup === popup) {
       activePopup = null;
+      demoMode?.stop();
       selectNode(null, null);
     }
   });

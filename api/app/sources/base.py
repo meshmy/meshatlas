@@ -47,6 +47,11 @@ class NodeUpdate:
     display_name: str | None = None
     short_name: str | None = None
     hardware_model: str | None = None
+    region: str | None = None
+    # True if `region` came from the node's own MapReport rather than being
+    # guessed from the MQTT topic -- see meshtastic_mqtt.py::_decode_map_report
+    # and db.py::apply_node_update.
+    region_authoritative: bool = False
 
     latitude: float | None = None
     longitude: float | None = None

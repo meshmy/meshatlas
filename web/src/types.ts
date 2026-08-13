@@ -10,6 +10,11 @@ export interface NodeProperties {
   display_name: string | null;
   short_name: string | null;
   hardware_model: string | null;
+  // LoRa region preset (e.g. "US", "EU_868", "MY_919") the node's mesh is
+  // configured for -- see api/app/sources/meshtastic_mqtt.py
+  // (_decode_map_report when a node self-reports one, _region_from_topic
+  // as the fallback).
+  region: string | null;
   battery_pct: number | null;
   voltage: number | null;
   snr: number | null;

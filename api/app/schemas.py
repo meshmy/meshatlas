@@ -27,6 +27,7 @@ def node_to_feature(node: Node) -> dict:
             "display_name": node.display_name,
             "short_name": node.short_name,
             "hardware_model": node.hardware_model,
+            "region": node.region,
             "battery_pct": node.battery_pct,
             "voltage": node.voltage,
             "snr": node.snr,

@@ -87,6 +87,15 @@ def apply_node_update(session: Session, update: NodeUpdate) -> Node:
         node.short_name = update.short_name
     if update.hardware_model:
         node.hardware_model = update.hardware_model
+    # A topic-derived guess (region_authoritative=False) must not clobber a
+    # region already established from the node's own MapReport -- MapReport
+    # is opt-in and infrequent, so without this guard the much more common
+    # topic-derived writes (every NodeInfo/Position/Telemetry packet) would
+    # almost always overwrite it right back. An authoritative update always
+    # applies, including to replace an earlier non-authoritative guess.
+    if update.region and (update.region_authoritative or not node.region_authoritative):
+        node.region = update.region
+        node.region_authoritative = update.region_authoritative
     if update.battery_pct is not None:
         node.battery_pct = update.battery_pct
     if update.voltage is not None:

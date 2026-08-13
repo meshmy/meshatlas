@@ -568,17 +568,8 @@ function openNodePopup(feature: NodeFeature): void {
     }
   });
   activePopup = popup;
-
-  // Fade in over --popup-fade-ms (see style.css's .node-popup transition):
-  // start at opacity 0, force a synchronous reflow so the browser commits
-  // that hidden state, then drop the class so removing it is a genuine
-  // style change the transition actually animates -- a plain classList
-  // add-then-remove within the same task never renders the 0 state at all,
-  // so there'd be nothing to visibly transition from.
-  const el = popup.getElement();
-  el.classList.add("node-popup-hidden");
-  void el.offsetHeight;
-  el.classList.remove("node-popup-hidden");
+  // Fade-in plays automatically -- see style.css's popup-fade-in keyframe
+  // animation on .node-popup, which fires on insertion with no JS needed.
 }
 
 // Keep in sync with --popup-fade-ms in style.css.

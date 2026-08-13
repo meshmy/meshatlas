@@ -189,10 +189,22 @@ body {
   margin: 0 0 6px;
 }
 
-/* Fade in/out duration -- keep in sync with main.ts's POPUP_FADE_MS. */
+/* A transition can't fade this in reliably: it needs a previously-
+   rendered "from" state, and this class never stops applying to a popup
+   (it's set once, at creation, and never removed) so there's no prior
+   frame to transition from. A keyframe animation doesn't have that
+   requirement -- it plays from `from` the moment it starts applying,
+   which is exactly popup creation here. Fade-in/out duration -- keep in
+   sync with main.ts's POPUP_FADE_MS. */
+@keyframes popup-fade-in {
+  from {
+    opacity: 0;
+  }
+}
+
 .node-popup {
   opacity: 1;
-  transition: opacity var(--popup-fade-ms) ease-in-out;
+  animation: popup-fade-in var(--popup-fade-ms) ease-in-out;
 }
 
 .node-popup.node-popup-hidden {

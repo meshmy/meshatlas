@@ -203,11 +203,13 @@ export class TourMode {
       graph = buildGraph(this.getNodes(), this.getLinks());
       const path = computePathTo(graph, current, target);
       if (!path) {
-        // Different connected component -- no path to hop through.
+        // Different connected component -- no path to hop through, so
+        // there's no next hop's rotate step to lend this node its reading
+        // pause the way a normal hop gets one for free; give it its own.
         current = target;
         touched.add(current);
         await this.arriveAtFresh(graph.nodesById.get(current)!, generation);
-        if (isLastOfCycle && this.isActive(generation)) await this.pauseThenDepart(generation);
+        if (this.isActive(generation)) await this.pauseThenDepart(generation);
         if (!this.isActive(generation)) return;
         continue;
       }

@@ -14,8 +14,23 @@ const DEMO_PITCH = 70;
 // it and fly to the next node with no popup showing, only opening the new
 // one once the camera has actually landed.
 const STATIC_DURATION_MS = 10_000;
-const FLY_DURATION_MS = 10_000;
-const INITIAL_FLY_MS = 3000;
+// Fly duration scales with actual distance (see flyDurationFor()) rather
+// than being fixed, so a hop between two nearby nodes doesn't drag out as
+// long as a hop across the whole region. CRUISE_SPEED_MPS is picked so
+// typical LoRa mesh spacing (a few hundred meters to a couple of
+// kilometers) lands in between the floor and ceiling rather than pinned
+// to one end.
+const CRUISE_SPEED_MPS = 500;
+const MIN_FLY_DURATION_MS = 2000;
+const MAX_FLY_DURATION_MS = 10_000;
+// MapLibre's flyTo() zooms out mid-flight for a cinematic "rise" before
+// zooming back in, scaled by this curve (1.42 default -- "a high value
+// maximizes zooming for an exaggerated animation"; 1 is "circular
+// motion"). At DEMO_ZOOM/the default curve, longer hops rise enough to
+// dip below the 3D buildings layer's minzoom (12, see mapSetup.ts) and
+// buildings visibly vanish mid-flight. A flatter curve keeps the dip
+// shallow enough to stay above that threshold.
+const FLY_CURVE = 0.6;
 
 export interface DemoStatus {
   running: boolean;
@@ -27,12 +42,16 @@ interface Graph {
   adjacency: Map<string, Set<string>>;
 }
 
-/** Runs an unattended camera tour of the mesh: starts from a random node
- * that has at least one neighbor, then repeatedly flies to whichever
- * reachable node is the most hops away (preferring nodes not yet visited),
- * following the shortest path to it one hop at a time -- a simple
- * heuristic that tends to zig-zag across the whole graph rather than
- * pacing back and forth between two adjacent nodes. */
+/** Runs an unattended camera tour of the mesh: starts from a random
+ * eligible node, then works through a shuffled playlist of every other
+ * eligible node currently on screen, flying to each in turn via the
+ * shortest path (hopping through, and checking off, whatever other nodes
+ * that path happens to pass along the way). "Eligible" excludes 2-node
+ * islands (see eligibleNodeIds()) -- a pair of nodes linked only to each
+ * other has nothing to zig-zag through, just an immediate bounce back, so
+ * they're skipped rather than given their own stop. The playlist only
+ * reshuffles and starts repeating once every eligible node has had its
+ * own stop. */
 export class DemoMode {
   private running = false;
   private generation = 0;
@@ -107,17 +126,28 @@ export class DemoMode {
 
   /** Gets the camera into position on `feature` (no rotation -- the first
    * hop of whatever leg runs next takes care of that) and opens its info
-   * popup. Used both for the very first node of a tour and whenever the
-   * graph is exhausted and the tour has to jump to a fresh random node. */
+   * popup. Used for the very first node of a tour, and for playlist
+   * targets that aren't reachable from the current node at all (a
+   * different connected component) -- there's no path to hop through, so
+   * this just cuts straight there instead. Uses the same distance-scaled
+   * duration function as the regular between-node fly leg (measured from
+   * the camera's current position, since there's no "from" node here) so
+   * every movement in the tour feels the same, whether or not it's
+   * preceded by a rotate. */
   private async arriveAtFresh(feature: NodeFeature, generation: number): Promise<void> {
+    const center = this.map.getCenter();
+    const target = coordsOf(feature);
+    const duration = flyDurationFor([center.lng, center.lat], target);
     this.map.flyTo({
-      center: coordsOf(feature),
+      center: target,
       zoom: DEMO_ZOOM,
       pitch: DEMO_PITCH,
-      duration: INITIAL_FLY_MS,
+      duration,
+      curve: FLY_CURVE,
+      easing: easeInOutSine,
       essential: true,
     });
-    await this.delay(INITIAL_FLY_MS);
+    await this.delay(duration);
     if (!this.isActive(generation)) return;
     this.announce(feature);
   }
@@ -129,26 +159,37 @@ export class DemoMode {
       this.stop();
       return;
     }
-    let visited = new Set([current]);
     await this.arriveAtFresh(graph.nodesById.get(current)!, generation);
 
+    // Nodes that have had their own stop this cycle -- either as a
+    // playlist target or as an intermediate hop passed through on the way
+    // to one. A fresh playlist is drawn, excluding these, whenever the
+    // current one runs out; only then does anything start repeating.
+    let touched = new Set([current]);
+    let playlist = shufflePlaylist(graph, touched);
+    let playlistIndex = 0;
+
     while (this.isActive(generation)) {
-      graph = buildGraph(this.getNodes(), this.getLinks());
-      let path = computeNextPath(graph, current, visited);
-      if (!path || path.length < 2) {
-        // Every reachable node has already been visited -- allow revisits
-        // so the tour keeps moving instead of stalling.
-        visited = new Set([current]);
-        path = computeNextPath(graph, current, visited);
+      if (playlistIndex >= playlist.length) {
+        graph = buildGraph(this.getNodes(), this.getLinks());
+        touched = new Set([current]);
+        playlist = shufflePlaylist(graph, touched);
+        playlistIndex = 0;
+        if (playlist.length === 0) break; // nothing left anywhere to tour
       }
-      if (!path || path.length < 2) {
-        // current has gone isolated (e.g. its links dropped out of the
-        // live feed) -- jump to a fresh random node elsewhere if one
-        // exists, otherwise there's nothing left to tour.
-        const restart = pickRandomStartNode(graph);
-        if (!restart) break;
-        current = restart;
-        visited = new Set([current]);
+
+      const target = playlist[playlistIndex++];
+      // Already reached as a pass-through hop earlier this cycle, or
+      // dropped out of the live/filtered node set since the playlist was
+      // drawn -- either way, nothing to do, move on to the next entry.
+      if (touched.has(target) || !graph.nodesById.has(target)) continue;
+
+      graph = buildGraph(this.getNodes(), this.getLinks());
+      const path = computePathTo(graph, current, target);
+      if (!path) {
+        // Different connected component -- no path to hop through.
+        current = target;
+        touched.add(current);
         await this.arriveAtFresh(graph.nodesById.get(current)!, generation);
         continue;
       }
@@ -156,9 +197,15 @@ export class DemoMode {
       for (let i = 1; i < path.length && this.isActive(generation); i++) {
         const from = graph.nodesById.get(path[i - 1])!;
         const to = graph.nodesById.get(path[i])!;
-        const bearing = bearingBetween(coordsOf(from), coordsOf(to));
+        // shortestBearing() re-expresses the target compass bearing as a
+        // value numerically close to the camera's actual current bearing
+        // (which may itself be outside 0-360 from a previous hop's own
+        // shortest-path adjustment), so the rotate always turns whichever
+        // way is shorter instead of potentially sweeping the long way
+        // around to an equivalent angle.
+        const bearing = shortestBearing(this.map.getBearing(), bearingBetween(coordsOf(from), coordsOf(to)));
 
-        this.map.easeTo({ bearing, duration: STATIC_DURATION_MS, easing: easeInOutCubic, essential: true });
+        this.map.easeTo({ bearing, duration: STATIC_DURATION_MS, easing: easeInOutSine, essential: true });
         await this.delay(STATIC_DURATION_MS);
         if (!this.isActive(generation)) return;
 
@@ -166,21 +213,23 @@ export class DemoMode {
         // the camera's in transit, so nothing should be shown until arrival.
         this.onDepart();
 
+        const flyDuration = flyDurationFor(coordsOf(from), coordsOf(to));
         this.map.flyTo({
           center: coordsOf(to),
           zoom: DEMO_ZOOM,
           pitch: DEMO_PITCH,
           bearing,
-          duration: FLY_DURATION_MS,
-          easing: easeInOutCubic,
+          duration: flyDuration,
+          curve: FLY_CURVE,
+          easing: easeInOutSine,
           essential: true,
         });
 
-        await this.delay(FLY_DURATION_MS);
+        await this.delay(flyDuration);
         if (!this.isActive(generation)) return;
 
         current = path[i];
-        visited.add(current);
+        touched.add(current);
         this.announce(to);
       }
     }
@@ -214,51 +263,62 @@ function buildGraph(nodes: NodeFeature[], links: LinkFeature[]): Graph {
 }
 
 function pickRandomStartNode(graph: Graph): string | null {
-  const candidates = [...graph.adjacency.entries()]
-    .filter(([, neighbors]) => neighbors.size > 0)
-    .map(([id]) => id);
+  const candidates = eligibleNodeIds(graph);
   if (candidates.length === 0) return null;
   return candidates[Math.floor(Math.random() * candidates.length)];
 }
 
-/** BFS shortest-hop path from `current` to whichever reachable node is
- * farthest in hop count -- preferring a node not yet in `visited` so the
- * tour keeps covering new ground; falls back to the overall farthest node
- * (ignoring `visited`) once everything reachable has already been seen.
- * Returns the path including `current` at index 0, or null if `current`
- * has no reachable neighbors at all. */
-function computeNextPath(graph: Graph, current: string, visited: Set<string>): string[] | null {
-  const dist = new Map<string, number>([[current, 0]]);
+/** Every node with at least one neighbor, excluding ones whose connected
+ * component has exactly 2 members -- a pair of nodes linked only to each
+ * other isn't worth a tour stop (there's nothing to zig-zag through, just
+ * an immediate bounce back), so skip those islands entirely rather than
+ * giving them their own playlist turn. */
+function eligibleNodeIds(graph: Graph): string[] {
+  const componentSizes = computeComponentSizes(graph);
+  return [...graph.adjacency.entries()]
+    .filter(([id, neighbors]) => neighbors.size > 0 && componentSizes.get(id) !== 2)
+    .map(([id]) => id);
+}
+
+/** Size of each node's connected component, keyed by node id. Nodes with
+ * no neighbors at all are omitted. */
+function computeComponentSizes(graph: Graph): Map<string, number> {
+  const sizes = new Map<string, number>();
+  const seen = new Set<string>();
+  for (const id of graph.adjacency.keys()) {
+    if (seen.has(id) || graph.adjacency.get(id)!.size === 0) continue;
+    const component: string[] = [id];
+    seen.add(id);
+    for (let head = 0; head < component.length; head++) {
+      for (const neighbor of graph.adjacency.get(component[head]) ?? []) {
+        if (seen.has(neighbor)) continue;
+        seen.add(neighbor);
+        component.push(neighbor);
+      }
+    }
+    for (const memberId of component) sizes.set(memberId, component.length);
+  }
+  return sizes;
+}
+
+/** BFS shortest-hop path from `current` to `target`. Returns the path
+ * including `current` at index 0, or null if `target` isn't reachable
+ * from `current` at all (a different connected component). */
+function computePathTo(graph: Graph, current: string, target: string): string[] | null {
+  if (current === target) return null;
   const prev = new Map<string, string>();
+  const seen = new Set<string>([current]);
   const queue: string[] = [current];
-  for (let head = 0; head < queue.length; head++) {
+  for (let head = 0; head < queue.length && !seen.has(target); head++) {
     const node = queue[head];
-    const d = dist.get(node)!;
     for (const neighbor of graph.adjacency.get(node) ?? []) {
-      if (dist.has(neighbor)) continue;
-      dist.set(neighbor, d + 1);
+      if (seen.has(neighbor)) continue;
+      seen.add(neighbor);
       prev.set(neighbor, node);
       queue.push(neighbor);
     }
   }
-
-  let best: string | null = null;
-  let bestDist = -1;
-  let bestAny: string | null = null;
-  let bestAnyDist = -1;
-  for (const [id, d] of dist) {
-    if (id === current) continue;
-    if (d > bestAnyDist) {
-      bestAnyDist = d;
-      bestAny = id;
-    }
-    if (!visited.has(id) && d > bestDist) {
-      bestDist = d;
-      best = id;
-    }
-  }
-  const target = best ?? bestAny;
-  if (!target) return null;
+  if (!seen.has(target)) return null;
 
   const path: string[] = [target];
   let node = target;
@@ -270,12 +330,38 @@ function computeNextPath(graph: Graph, current: string, visited: Set<string>): s
   return path;
 }
 
-/** Standard ease-in-out cubic, t in 0..1. MapLibre's easeTo/flyTo both
- * default to a CSS "ease"-style curve (cubic-bezier(0.25, 0.1, 0.25, 1)),
- * whose nonzero start slope reads as a fairly brisk start next to a true
- * standing start. */
-function easeInOutCubic(t: number): number {
-  return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+/** Fisher-Yates shuffle of every eligible node (see eligibleNodeIds()),
+ * minus whatever's in `exclude`. */
+function shufflePlaylist(graph: Graph, exclude: Set<string>): string[] {
+  const ids = eligibleNodeIds(graph).filter((id) => !exclude.has(id));
+  for (let i = ids.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [ids[i], ids[j]] = [ids[j], ids[i]];
+  }
+  return ids;
+}
+
+/** Ease-in-out sine, t in 0..1. Gentler than a cubic ease-in-out -- its
+ * peak (midpoint) speed is only ~1.57x the average speed, vs. ~3x for a
+ * cubic curve, so the camera doesn't feel like it's rushing through the
+ * middle of the rotate/fly. Still eases fully to a stop at both ends,
+ * unlike MapLibre's own default (a CSS "ease"-style cubic-bezier with a
+ * nonzero start slope). */
+function easeInOutSine(t: number): number {
+  return (1 - Math.cos(Math.PI * t)) / 2;
+}
+
+/** Re-expresses `targetBearing` (a 0-360 compass bearing) as a value
+ * numerically close to `currentBearing` -- possibly negative or past 360,
+ * since `currentBearing` itself may already be outside 0-360 -- chosen so
+ * that interpolating from `currentBearing` to the returned value sweeps
+ * through the shortest of the two possible rotations rather than
+ * whichever one a raw 0-360 target happens to land on. */
+function shortestBearing(currentBearing: number, targetBearing: number): number {
+  let delta = (targetBearing - currentBearing) % 360;
+  if (delta < -180) delta += 360;
+  else if (delta > 180) delta -= 360;
+  return currentBearing + delta;
 }
 
 function coordsOf(feature: NodeFeature): [number, number] {
@@ -293,4 +379,26 @@ function bearingBetween([lon1, lat1]: [number, number], [lon2, lat2]: [number, n
   const y = Math.sin(deltaLambda) * Math.cos(phi2);
   const x = Math.cos(phi1) * Math.sin(phi2) - Math.sin(phi1) * Math.cos(phi2) * Math.cos(deltaLambda);
   return ((Math.atan2(y, x) * 180) / Math.PI + 360) % 360;
+}
+
+/** Haversine great-circle distance, in meters. */
+function distanceMeters([lon1, lat1]: [number, number], [lon2, lat2]: [number, number]): number {
+  const EARTH_RADIUS_M = 6_371_000;
+  const toRad = (deg: number) => (deg * Math.PI) / 180;
+  const phi1 = toRad(lat1);
+  const phi2 = toRad(lat2);
+  const deltaPhi = toRad(lat2 - lat1);
+  const deltaLambda = toRad(lon2 - lon1);
+  const a =
+    Math.sin(deltaPhi / 2) ** 2 + Math.cos(phi1) * Math.cos(phi2) * Math.sin(deltaLambda / 2) ** 2;
+  return 2 * EARTH_RADIUS_M * Math.asin(Math.sqrt(a));
+}
+
+/** Fly duration proportional to real-world distance at CRUISE_SPEED_MPS,
+ * clamped to [MIN_FLY_DURATION_MS, MAX_FLY_DURATION_MS] so a hop between
+ * nearby nodes doesn't drag on as long as one clear across the region,
+ * while a very long hop still resolves in a bounded time. */
+function flyDurationFor(from: [number, number], to: [number, number]): number {
+  const ms = (distanceMeters(from, to) / CRUISE_SPEED_MPS) * 1000;
+  return Math.min(MAX_FLY_DURATION_MS, Math.max(MIN_FLY_DURATION_MS, ms));
 }

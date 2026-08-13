@@ -515,16 +515,32 @@ function openNodePopup(feature: NodeFeature): void {
     }
   });
   activePopup = popup;
+
+  // Fade in over 500ms (see style.css's .node-popup transition): start at
+  // opacity 0, then drop the class on the next frame so the browser has
+  // already painted the 0 state and the transition actually animates
+  // instead of jumping straight to opaque.
+  const el = popup.getElement();
+  el.classList.add("node-popup-hidden");
+  requestAnimationFrame(() => requestAnimationFrame(() => el.classList.remove("node-popup-hidden")));
 }
+
+// Keep in sync with .node-popup.node-popup-hidden's transition-duration
+// in style.css.
+const POPUP_FADE_OUT_MS = 1000;
 
 /** Nulls the reference before removing so the popup's own "close" handler
  * (above) sees activePopup !== itself and doesn't recurse back into
- * selectNode() when we're the ones swapping it out. */
+ * selectNode() when we're the ones swapping it out. Actual removal is
+ * deferred so the fade-out transition (triggered by re-adding
+ * .node-popup-hidden) has time to play instead of the popup just
+ * vanishing. */
 function closePopup(): void {
   if (!activePopup) return;
   const popup = activePopup;
   activePopup = null;
-  popup.remove();
+  popup.getElement().classList.add("node-popup-hidden");
+  window.setTimeout(() => popup.remove(), POPUP_FADE_OUT_MS);
 }
 
 function buildPopupContent(feature: NodeFeature): HTMLElement {

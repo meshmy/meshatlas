@@ -76,6 +76,11 @@ body {
   color: var(--muted);
 }
 
+#systems-list label.system-unsupported {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 #panel input[type="range"],
 #panel select {
   width: 100%;

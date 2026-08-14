@@ -40,7 +40,7 @@ const BUILDING_SOURCE_CANDIDATES = ["openmaptiles", "carto", "openfreemap", "pro
 
 const TERRAIN_SOURCE_ID = "meshatlas-terrain";
 const BUILDINGS_LAYER_ID = "meshatlas-3d-buildings";
-export const DEFAULT_TERRAIN_EXAGGERATION = 1;
+export const DEFAULT_TERRAIN_EXAGGERATION = 1.5;
 
 // MapLibre decays tile resolution toward the horizon on pitched views (see
 // createCalculateTileZoomFunction in maplibre-gl/src/geo/projection/covering_tiles.ts).

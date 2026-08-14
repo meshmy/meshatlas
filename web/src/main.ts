@@ -331,7 +331,7 @@ async function refreshAll(): Promise<void> {
 async function loadSystemsList(): Promise<void> {
   const systems = await getSystems();
   systemsList.innerHTML = "";
-  enabledSystems = new Set(systems.map((s) => s.id));
+  enabledSystems = new Set(systems.filter((s) => s.id === "meshtastic").map((s) => s.id));
   // refreshAll() (called in parallel with this function, not awaited on it)
   // may already have populated allLinks and run applyLinkFilters() before
   // this line populates enabledSystems -- since it starts as an empty Set,
@@ -344,10 +344,17 @@ async function loadSystemsList(): Promise<void> {
   void applyLinkFilters();
 
   for (const system of systems) {
+    // Only Meshtastic has a working ingestion Source today (see
+    // api/app/sources/__init__.py's REGISTRY) -- the rest are schema/API
+    // placeholders (api/app/db.py's KNOWN_SYSTEMS) with no live data, so
+    // their checkboxes render disabled and greyed out rather than an
+    // enabled-but-empty toggle.
+    const isSupported = system.id === "meshtastic";
     const label = document.createElement("label");
     const checkbox = document.createElement("input");
     checkbox.type = "checkbox";
-    checkbox.checked = true;
+    checkbox.checked = isSupported;
+    checkbox.disabled = !isSupported;
     checkbox.id = `system-${system.id}`;
     checkbox.dataset.systemId = system.id;
     checkbox.addEventListener("change", () => {
@@ -357,11 +364,15 @@ async function loadSystemsList(): Promise<void> {
       void applyLinkFilters();
     });
     label.append(checkbox, ` ${system.name}`);
+    if (!isSupported) label.classList.add("system-unsupported");
     systemsList.append(label);
     // Built dynamically, after GET /api/systems resolves, so the earlier
     // restoreAll(panelEl) pass (Step A, at the top of the file) never saw
     // this checkbox -- restore and apply its saved state here instead.
-    if (restoreControl(checkbox)) checkbox.dispatchEvent(new Event("change", { bubbles: true }));
+    // Skipped for unsupported systems: they're always unchecked+disabled,
+    // regardless of any stale localStorage value from before they were
+    // marked unsupported.
+    if (isSupported && restoreControl(checkbox)) checkbox.dispatchEvent(new Event("change", { bubbles: true }));
   }
 }
 

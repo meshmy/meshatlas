@@ -12,6 +12,16 @@
   --popup-fade-ms: 1000ms;
 }
 
+:root[data-theme="day"] {
+  color-scheme: light;
+  --bg: #f5f7fa;
+  --panel-bg: #ffffff;
+  --border: #d8dee5;
+  --text: #1c2530;
+  --muted: #5b6b7a;
+  --accent: #1f6feb;
+}
+
 * {
   box-sizing: border-box;
 }

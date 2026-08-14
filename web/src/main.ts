@@ -1,11 +1,18 @@
 import { LngLatBounds, Popup, type GeoJSONSource } from "maplibre-gl";
 import { connectLiveFeed, getLinks, getNodeHistory, getNodes, getSystems } from "./api";
-import { createMap, setBuildingExaggeration, setBuildingRenderDistance, setTerrainExaggeration } from "./mapSetup";
+import {
+  createMap,
+  setBuildingExaggeration,
+  setBuildingRenderDistance,
+  setMapTheme,
+  setTerrainExaggeration,
+} from "./mapSetup";
 import { DeckOverlay } from "./deckOverlay";
 import { TourMode, type TourStatus } from "./tourMode";
 import { LinksLayer } from "./linksLayer";
 import { NodesLayer, type NodeStatus } from "./nodesLayer";
 import { dispatchRestored, restoreAll, restoreControl, watchAndPersist } from "./sidebarSettings";
+import { applyTheme, resolveInitialTheme, type Theme } from "./theme";
 import { loadSavedViewport } from "./viewportPersistence";
 import "./style.css";
 import type { LinkFeature, LiveMessage, NodeFeature } from "./types";
@@ -20,7 +27,23 @@ const DEFAULT_REGION = "MY_919";
 const mapContainer = document.getElementById("map");
 if (!mapContainer) throw new Error("missing #map container");
 
-const map = createMap(mapContainer);
+// Resolved (and applied to the sidebar/panel CSS via data-theme) before
+// createMap() so the basemap picks the matching style on first load --
+// see theme.ts. index.html's inline head script makes the same decision
+// synchronously, before this module even runs, purely to avoid a flash of
+// the wrong theme; this is what actually drives the map/JS state.
+let currentTheme: Theme = resolveInitialTheme();
+applyTheme(currentTheme);
+
+const map = createMap(mapContainer, currentTheme);
+
+const themeToggleInput = requireElement<HTMLInputElement>("theme-toggle");
+// Independent of restoreAll() below: restoreAll() only applies a
+// *previously saved* value and is a no-op otherwise, but currentTheme may
+// have come from the matchMedia fallback (nothing saved yet) -- this is
+// what makes the checkbox reflect that resolved default rather than the
+// HTML-authored "unchecked" state.
+themeToggleInput.checked = currentTheme === "day";
 
 const hoursInput = requireElement<HTMLInputElement>("hours");
 const hoursValue = requireElement<HTMLOutputElement>("hours-value");
@@ -142,20 +165,10 @@ for (const eventName of ["dragstart", "zoomstart", "rotatestart", "pitchstart"] 
 map.on("load", () => {
   window.clearTimeout(loadTimeout);
   try {
-    nodesLayer = new NodesLayer(map);
+    nodesLayer = new NodesLayer(map, currentTheme);
     linksLayer = new LinksLayer(new DeckOverlay(map), map);
 
-    map.addSource(HISTORY_SOURCE_ID, { type: "geojson", data: emptyLineCollection() });
-    map.addLayer({
-      id: HISTORY_LAYER_ID,
-      type: "line",
-      source: HISTORY_SOURCE_ID,
-      paint: {
-        "line-color": "#4da3ff",
-        "line-width": 2,
-        "line-dasharray": [1, 1],
-      },
-    });
+    addHistoryLayer();
 
     nodesLayer.onNodeClick((feature) => {
       tourMode?.stop();
@@ -263,6 +276,23 @@ tourToggleButton.addEventListener("click", () => {
   if (!tourMode.start()) {
     tourStatusEl.textContent = "No node with neighbors to tour yet.";
   }
+});
+themeToggleInput.addEventListener("change", () => {
+  const nextTheme: Theme = themeToggleInput.checked ? "day" : "night";
+  // The second restore pass below (dispatchRestored) re-fires "change" on
+  // every control restored from storage, including this one, even when its
+  // value hasn't actually moved from what createMap() already loaded with
+  // -- unlike the other restored controls, a no-op re-application here
+  // would still trigger a full, visibly flickery map restyle, so skip it.
+  if (nextTheme === currentTheme) return;
+  currentTheme = nextTheme;
+  applyTheme(currentTheme);
+  void layersReady.then(() =>
+    setMapTheme(map, currentTheme, () => {
+      addHistoryLayer();
+      nodesLayer!.reattach(currentTheme);
+    }),
+  );
 });
 
 // Second restore pass (see the Step A comment above, near panelEl): now
@@ -645,6 +675,24 @@ function setHistoryTrail(geometry: { type: "LineString"; coordinates: [number, n
 
 function emptyLineCollection() {
   return { type: "FeatureCollection" as const, features: [] };
+}
+
+/** Adds the history-trail source/layer to whatever style is currently
+ * active. Split out so it can be called again after a theme switch --
+ * setMapTheme()'s style swap wipes every programmatically added source/
+ * layer, this one included (see mapSetup.ts's setMapTheme() comment). */
+function addHistoryLayer(): void {
+  map.addSource(HISTORY_SOURCE_ID, { type: "geojson", data: emptyLineCollection() });
+  map.addLayer({
+    id: HISTORY_LAYER_ID,
+    type: "line",
+    source: HISTORY_SOURCE_ID,
+    paint: {
+      "line-color": "#4da3ff",
+      "line-width": 2,
+      "line-dasharray": [1, 1],
+    },
+  });
 }
 
 function requireElement<T extends HTMLElement>(id: string): T {

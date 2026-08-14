@@ -7,8 +7,10 @@ WORKDIR /app
 # rather than runtime environment variables like API_UPSTREAM below.
 ARG API_BASE_URL=/api
 ARG MAP_STYLE_URL=https://tiles.openfreemap.org/styles/liberty
+ARG MAP_STYLE_URL_DAY=https://tiles.openfreemap.org/styles/positron
 ENV VITE_API_BASE_URL=$API_BASE_URL
 ENV VITE_MAP_STYLE_URL=$MAP_STYLE_URL
+ENV VITE_MAP_STYLE_URL_DAY=$MAP_STYLE_URL_DAY
 
 COPY package.json package-lock.json* ./
 RUN npm install

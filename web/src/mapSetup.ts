@@ -7,6 +7,7 @@ import {
   TerrainControl,
 } from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
+import type { Theme } from "./theme";
 import { loadSavedViewport, persistViewportOnChange } from "./viewportPersistence";
 
 // Public, free, no-API-key elevation tiles descended from the original
@@ -24,7 +25,17 @@ const TERRAIN_DEM_URL = "https://s3.amazonaws.com/elevation-tiles-prod/terrarium
 // zoom (background rgb(12,12,12) vs water rgb(27,27,29)) is fixed below
 // in improveLowZoomContrast() instead. Override via MAP_STYLE_URL if your
 // network reaches CARTO fine and you'd rather have it out of the box.
-const DEFAULT_STYLE_URL = "https://tiles.openfreemap.org/styles/dark";
+const DEFAULT_NIGHT_STYLE_URL = "https://tiles.openfreemap.org/styles/dark";
+
+// OpenFreeMap's "positron" style -- the light-mode counterpart, same CDN
+// reliability reasoning as above. Override via MAP_STYLE_URL_DAY.
+const DEFAULT_DAY_STYLE_URL = "https://tiles.openfreemap.org/styles/positron";
+
+function styleUrlFor(theme: Theme): string {
+  return theme === "day"
+    ? (import.meta.env.VITE_MAP_STYLE_URL_DAY ?? DEFAULT_DAY_STYLE_URL)
+    : (import.meta.env.VITE_MAP_STYLE_URL ?? DEFAULT_NIGHT_STYLE_URL);
+}
 
 /** Candidate vector source ids to try for 3D building extrusion, in
  * priority order. OpenFreeMap/OpenMapTiles-based styles publish an
@@ -58,13 +69,19 @@ const MAPLIBRE_DEFAULT_MAX_ZOOM_LEVELS_ON_SCREEN = 9.314;
 const BUILDING_TILE_COUNT_RATIO = 10;
 export const DEFAULT_BUILDING_DRAW_DISTANCE_LEVEL = 3;
 
-// Set once setUpTerrainAndBuildings() runs (on the map's "load" event); a
-// module-level singleton is fine since createMap() is only ever called once
-// per page. Kept around so setTerrainExaggeration() can update its
-// `options.exaggeration` too -- TerrainControl's own on/off button
-// (_toggleTerrain in maplibre-gl) re-reads that field every time it turns
-// terrain back on, so without this a slider change would get silently
-// reverted the next time the user toggled terrain off and on.
+// Set once setUpTerrainAndBuildings() first runs and left in place after
+// that -- it's a map control (addControl), not a style layer, so it
+// survives setStyle() and must NOT be re-created/re-added on the later
+// calls setMapTheme() makes on every theme switch (that stacked a new
+// terrain-toggle button on the map each time). Kept around so
+// setTerrainExaggeration() can update its `options.exaggeration` too --
+// TerrainControl's own on/off button (_toggleTerrain in maplibre-gl)
+// re-reads that field every time it turns terrain back on, so without this
+// a slider change would get silently reverted the next time the user
+// toggled terrain off and on. Also doubles as the "current terrain
+// exaggeration" source of truth for setUpTerrainAndBuildings() itself, so a
+// theme switch re-applies whatever the user last set rather than resetting
+// to DEFAULT_TERRAIN_EXAGGERATION.
 let terrainControl: TerrainControl | null = null;
 
 // Set once setUpTerrainAndBuildings() resolves a building source, so
@@ -74,13 +91,17 @@ let terrainControl: TerrainControl | null = null;
 // tile LOD is a per-source property, there's no per-layer equivalent.
 let buildingSourceId: string | null = null;
 
-export function createMap(container: HTMLElement): MapLibreMap {
-  const styleUrl = import.meta.env.VITE_MAP_STYLE_URL ?? DEFAULT_STYLE_URL;
+// Current "Building draw distance" slider level, so a theme switch's
+// re-added buildings layer (see setUpTerrainAndBuildings()) re-applies it
+// instead of resetting to DEFAULT_BUILDING_DRAW_DISTANCE_LEVEL.
+let currentBuildingDrawDistanceLevel = DEFAULT_BUILDING_DRAW_DISTANCE_LEVEL;
+
+export function createMap(container: HTMLElement, initialTheme: Theme): MapLibreMap {
   const savedViewport = loadSavedViewport();
 
   const map = new MapLibreMap({
     container,
-    style: styleUrl,
+    style: styleUrlFor(initialTheme),
     center: savedViewport ? [savedViewport.lng, savedViewport.lat] : [0, 20],
     zoom: savedViewport?.zoom ?? 2,
     pitch: savedViewport?.pitch ?? 45,
@@ -93,13 +114,36 @@ export function createMap(container: HTMLElement): MapLibreMap {
   map.addControl(new ScaleControl({ unit: "metric" }), "bottom-left");
   map.addControl(new GeolocateControl({ trackUserLocation: false }), "top-left");
 
-  map.on("load", () => setUpTerrainAndBuildings(map));
+  map.on("load", () => setUpTerrainAndBuildings(map, initialTheme));
   persistViewportOnChange(map);
 
   return map;
 }
 
-function setUpTerrainAndBuildings(map: MapLibreMap): void {
+/** Switches the basemap to `theme`'s style. setStyle() diffs against
+ * everything currently in the style -- including our own programmatically
+ * added terrain/hillshade/buildings sources and layers (see
+ * setUpTerrainAndBuildings) -- so all of that gets torn down and must be
+ * re-added once the new style finishes loading, same as the initial "load"
+ * handler in createMap() does. Controls (added via addControl, e.g.
+ * TerrainControl and the deck.gl links overlay) aren't style-scoped and
+ * survive untouched, so they're not re-added here. `onReady` lets callers
+ * (main.ts) re-add their own style-scoped additions -- the history trail
+ * layer and NodesLayer's source/layers -- once ours are back in place. */
+export function setMapTheme(map: MapLibreMap, theme: Theme, onReady?: () => void): void {
+  map.once("style.load", () => {
+    setUpTerrainAndBuildings(map, theme);
+    onReady?.();
+  });
+  map.setStyle(styleUrlFor(theme));
+}
+
+function setUpTerrainAndBuildings(map: MapLibreMap, theme: Theme): void {
+  // On a theme switch, terrainControl already exists and holds whatever the
+  // user last set via the exaggeration slider -- reuse it rather than
+  // resetting to the default (see the terrainControl comment above).
+  const exaggeration = terrainControl?.options.exaggeration ?? DEFAULT_TERRAIN_EXAGGERATION;
+
   map.addSource(TERRAIN_SOURCE_ID, {
     type: "raster-dem",
     tiles: [TERRAIN_DEM_URL],
@@ -108,7 +152,7 @@ function setUpTerrainAndBuildings(map: MapLibreMap): void {
     encoding: "terrarium",
     attribution: "Terrain: AWS Terrain Tiles (Mapzen/Amazon)",
   });
-  map.setTerrain({ source: TERRAIN_SOURCE_ID, exaggeration: DEFAULT_TERRAIN_EXAGGERATION });
+  map.setTerrain({ source: TERRAIN_SOURCE_ID, exaggeration });
 
   map.addLayer({
     id: "meshatlas-hillshade",
@@ -125,13 +169,24 @@ function setUpTerrainAndBuildings(map: MapLibreMap): void {
     },
   });
 
-  terrainControl = new TerrainControl({
-    source: TERRAIN_SOURCE_ID,
-    exaggeration: DEFAULT_TERRAIN_EXAGGERATION,
-  });
-  map.addControl(terrainControl, "top-left");
+  // TerrainControl is a map control (added via addControl), not a style
+  // layer -- it survives setStyle() untouched, unlike everything else in
+  // this function. Re-creating and re-adding it on every theme switch (this
+  // function also runs from setMapTheme()'s "style.load" handler) stacked a
+  // new terrain-toggle button on the map on every toggle instead of reusing
+  // the one already there.
+  if (!terrainControl) {
+    terrainControl = new TerrainControl({
+      source: TERRAIN_SOURCE_ID,
+      exaggeration: DEFAULT_TERRAIN_EXAGGERATION,
+    });
+    map.addControl(terrainControl, "top-left");
+  }
 
-  improveLowZoomContrast(map);
+  // Dark-style-specific -- Positron doesn't have OpenFreeMap dark's low-zoom
+  // water/background contrast problem, and this patch's fixed dark-blue
+  // fill would look wrong painted over a light basemap.
+  if (theme === "night") improveLowZoomContrast(map);
 
   buildingSourceId = pickBuildingSource(map);
   if (buildingSourceId) {
@@ -143,12 +198,12 @@ function setUpTerrainAndBuildings(map: MapLibreMap): void {
       minzoom: 12,
       paint: {
         "fill-extrusion-color": "#5c6b7a",
-        "fill-extrusion-height": buildingHeightExpr(DEFAULT_TERRAIN_EXAGGERATION),
-        "fill-extrusion-base": buildingBaseExpr(DEFAULT_TERRAIN_EXAGGERATION),
+        "fill-extrusion-height": buildingHeightExpr(exaggeration),
+        "fill-extrusion-base": buildingBaseExpr(exaggeration),
         "fill-extrusion-opacity": 0.85,
       },
     });
-    setBuildingRenderDistance(map, DEFAULT_BUILDING_DRAW_DISTANCE_LEVEL);
+    setBuildingRenderDistance(map, currentBuildingDrawDistanceLevel);
   }
 }
 
@@ -158,6 +213,7 @@ function setUpTerrainAndBuildings(map: MapLibreMap): void {
  * rather than tileCountMaxMinRatio up). No-op before the building source
  * has resolved (map "load" hasn't fired yet). */
 export function setBuildingRenderDistance(map: MapLibreMap, level: number): void {
+  currentBuildingDrawDistanceLevel = level;
   if (!buildingSourceId) return;
   const maxZoomLevelsOnScreen = MAPLIBRE_DEFAULT_MAX_ZOOM_LEVELS_ON_SCREEN - level;
   map.setSourceTileLodParams(maxZoomLevelsOnScreen, BUILDING_TILE_COUNT_RATIO, buildingSourceId);

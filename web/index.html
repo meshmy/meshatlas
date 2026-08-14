@@ -4,6 +4,24 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>MeshAtlas</title>
+    <!-- Blocking (not type="module", which defers) so this runs before the
+         body paints -- avoids a flash of the wrong theme. Mirrors, in plain
+         JS, the same stored-value-or-matchMedia decision src/theme.ts's
+         resolveInitialTheme() makes; that TS version is what actually
+         drives the map/JS state once main.ts runs. See theme.ts. -->
+    <script>
+      (function () {
+        try {
+          var raw = localStorage.getItem("meshatlas:sidebar-settings");
+          var stored = raw ? JSON.parse(raw)["theme-toggle"] : undefined;
+          var isDay = typeof stored === "boolean" ? stored : matchMedia("(prefers-color-scheme: light)").matches;
+          document.documentElement.dataset.theme = isDay ? "day" : "night";
+        } catch (e) {
+          // Storage disabled/corrupt -- fall through to the default (dark)
+          // :root palette rather than blocking the page.
+        }
+      })();
+    </script>
   </head>
   <body>
     <div id="app">
@@ -22,6 +40,10 @@
           <label for="terrain-exaggeration">Terrain exaggeration</label>
           <input id="terrain-exaggeration" type="range" min="1" max="3" step="0.25" value="1.5" />
           <output id="terrain-exaggeration-value" for="terrain-exaggeration">1.5x</output>
+        </section>
+
+        <section>
+          <label><input id="theme-toggle" type="checkbox" /> Day mode</label>
         </section>
 
         <section>

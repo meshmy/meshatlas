@@ -4,6 +4,7 @@ import type {
   Map as MapLibreMap,
   MapGeoJSONFeature,
 } from "maplibre-gl";
+import type { Theme } from "./theme";
 import type { FeatureCollection, NodeFeature } from "./types";
 
 const SOURCE_ID = "meshatlas-nodes";
@@ -18,6 +19,7 @@ export type NodeStatus = "fresh" | "stale" | "offline";
 export class NodesLayer {
   private readonly map: MapLibreMap;
   private readonly nodes = new Map<string, NodeFeature>();
+  private theme: Theme;
   private onSelect: ((feature: NodeFeature) => void) | null = null;
   private onHover: ((feature: NodeFeature | null) => void) | null = null;
   private hoveredId: string | null = null;
@@ -28,56 +30,10 @@ export class NodesLayer {
   private visibleStatuses: Set<NodeStatus> = new Set(["fresh", "stale", "offline"]);
   private visibleRegion: string | null = null;
 
-  constructor(map: MapLibreMap) {
+  constructor(map: MapLibreMap, theme: Theme) {
     this.map = map;
-    this.map.addSource(SOURCE_ID, {
-      type: "geojson",
-      // See the cast in render() for why this needs `unknown` in between:
-      // our NodeFeature type allows a null geometry, maplibre's stricter
-      // GeoJSON type doesn't, and an empty features array trivially
-      // satisfies both at runtime.
-      data: emptyCollection() as unknown as GeoJSON.FeatureCollection,
-    });
-
-    this.map.addLayer({
-      id: CIRCLE_LAYER_ID,
-      type: "circle",
-      source: SOURCE_ID,
-      filter: ["==", ["geometry-type"], "Point"],
-      paint: {
-        "circle-radius": ["interpolate", ["linear"], ["zoom"], 2, 3, 12, 8],
-        "circle-color": [
-          "match",
-          ["get", "status"],
-          "fresh",
-          "#3ecf6a",
-          "stale",
-          "#e0a63c",
-          /* offline */ "#6b7684",
-        ],
-        "circle-stroke-color": "#0d1117",
-        "circle-stroke-width": 1.5,
-      },
-    });
-
-    this.map.addLayer({
-      id: LABEL_LAYER_ID,
-      type: "symbol",
-      source: SOURCE_ID,
-      filter: ["==", ["geometry-type"], "Point"],
-      layout: {
-        "text-field": ["coalesce", ["get", "short_name"], ["get", "native_id"]],
-        "text-size": 11,
-        "text-offset": [0, 1.2],
-        "text-anchor": "top",
-        "text-optional": true,
-      },
-      paint: {
-        "text-color": "#e6edf3",
-        "text-halo-color": "#0d1117",
-        "text-halo-width": 1,
-      },
-    });
+    this.theme = theme;
+    this.attachToStyle();
 
     this.map.on("click", CIRCLE_LAYER_ID, (event) => {
       const feature = event.features?.[0] as MapGeoJSONFeature | undefined;
@@ -107,6 +63,83 @@ export class NodesLayer {
     });
 
     this.refreshTimer = window.setInterval(() => this.render(), 30_000);
+  }
+
+  /** Adds our source and both layers to whatever style is currently
+   * active. Split out from the constructor so setMapTheme()'s style swap
+   * (which wipes every programmatically added source/layer -- see
+   * mapSetup.ts's setMapTheme() comment) can re-run just this part via
+   * reattach(), without re-registering the click/hover listeners below
+   * (those are bound to the Map instance by layer id and survive the
+   * layer being removed and re-added with the same id). */
+  private attachToStyle(): void {
+    this.map.addSource(SOURCE_ID, {
+      type: "geojson",
+      // See the cast in render() for why this needs `unknown` in between:
+      // our NodeFeature type allows a null geometry, maplibre's stricter
+      // GeoJSON type doesn't, and an empty features array trivially
+      // satisfies both at runtime.
+      data: emptyCollection() as unknown as GeoJSON.FeatureCollection,
+    });
+
+    // Stroke/label colors are near-black/near-white, tuned for contrast
+    // against one specific basemap brightness -- they need to flip per
+    // theme or nodes/labels wash out against the other basemap. Status
+    // fill colors stay theme-invariant (same reasoning as the CSS
+    // swatches in style.css).
+    const strokeColor = this.theme === "day" ? "#ffffff" : "#0d1117";
+    const textColor = this.theme === "day" ? "#0d1117" : "#e6edf3";
+
+    this.map.addLayer({
+      id: CIRCLE_LAYER_ID,
+      type: "circle",
+      source: SOURCE_ID,
+      filter: ["==", ["geometry-type"], "Point"],
+      paint: {
+        "circle-radius": ["interpolate", ["linear"], ["zoom"], 2, 3, 12, 8],
+        "circle-color": [
+          "match",
+          ["get", "status"],
+          "fresh",
+          "#3ecf6a",
+          "stale",
+          "#e0a63c",
+          /* offline */ "#6b7684",
+        ],
+        "circle-stroke-color": strokeColor,
+        "circle-stroke-width": 1.5,
+      },
+    });
+
+    this.map.addLayer({
+      id: LABEL_LAYER_ID,
+      type: "symbol",
+      source: SOURCE_ID,
+      filter: ["==", ["geometry-type"], "Point"],
+      layout: {
+        "text-field": ["coalesce", ["get", "short_name"], ["get", "native_id"]],
+        "text-size": 11,
+        "text-offset": [0, 1.2],
+        "text-anchor": "top",
+        "text-optional": true,
+      },
+      paint: {
+        "text-color": textColor,
+        "text-halo-color": strokeColor,
+        "text-halo-width": 1,
+      },
+    });
+  }
+
+  /** Called after a basemap theme switch (see mapSetup.ts's setMapTheme()):
+   * re-adds our source/layers (wiped by the style swap) with colors for
+   * the new theme, then repopulates the new source from `this.nodes`,
+   * which is untouched by any of this -- it lives in this class, not in
+   * the style. */
+  reattach(theme: Theme): void {
+    this.theme = theme;
+    this.attachToStyle();
+    this.render();
   }
 
   onNodeClick(handler: (feature: NodeFeature) => void): void {

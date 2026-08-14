@@ -30,6 +30,13 @@ function writeStore(values: StoredValues): void {
   }
 }
 
+/** Reads whatever was last saved for `id`, without needing a live DOM
+ * element -- for the rare case (theme.ts's resolveInitialTheme()) that
+ * needs a stored value before its control exists in the DOM yet. */
+export function getStoredValue(id: string): StoredValue | undefined {
+  return readStore()[id];
+}
+
 function isPersistable(target: EventTarget | null): target is HTMLInputElement | HTMLSelectElement {
   return target instanceof HTMLInputElement || target instanceof HTMLSelectElement;
 }

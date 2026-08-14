@@ -76,6 +76,7 @@ services:
       args:
         API_BASE_URL: ${API_BASE_URL:-/api}
         MAP_STYLE_URL: ${MAP_STYLE_URL:-https://tiles.openfreemap.org/styles/dark}
+        MAP_STYLE_URL_DAY: ${MAP_STYLE_URL_DAY:-https://tiles.openfreemap.org/styles/positron}
     restart: unless-stopped
     depends_on:
       - api

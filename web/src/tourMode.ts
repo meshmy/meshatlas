@@ -43,15 +43,15 @@ interface Graph {
 }
 
 /** Runs an unattended camera tour of the mesh: starts from a random
- * eligible node, then works through a shuffled playlist of every other
- * eligible node currently on screen, flying to each in turn via the
- * shortest path (hopping through, and checking off, whatever other nodes
- * that path happens to pass along the way). "Eligible" excludes 2-node
- * islands (see eligibleNodeIds()) -- a pair of nodes linked only to each
- * other has nothing to zig-zag through, just an immediate bounce back, so
- * they're skipped rather than given their own stop. The playlist only
- * reshuffles and starts repeating once every eligible node has had its
- * own stop. */
+ * eligible node, then works through a playlist of every other eligible
+ * node currently on screen (shuffled, but grouped by connected component
+ * -- see shufflePlaylist()), flying to each in turn via the shortest path
+ * (hopping through, and checking off, whatever other nodes that path
+ * happens to pass along the way). "Eligible" excludes 2-node islands (see
+ * eligibleNodeIds()) -- a pair of nodes linked only to each other has
+ * nothing to zig-zag through, just an immediate bounce back, so they're
+ * skipped rather than given their own stop. The playlist only reshuffles
+ * and starts repeating once every eligible node has had its own stop. */
 export class TourMode {
   private running = false;
   private generation = 0;
@@ -302,11 +302,11 @@ function eligibleNodeIds(graph: Graph): string[] {
     .map(([id]) => id);
 }
 
-/** Size of each node's connected component, keyed by node id. Nodes with
- * no neighbors at all are omitted. */
-function computeComponentSizes(graph: Graph): Map<string, number> {
-  const sizes = new Map<string, number>();
+/** Every connected component of the graph, as a list of its member node
+ * ids (BFS/flood-fill order). Nodes with no neighbors at all are omitted. */
+function computeComponents(graph: Graph): string[][] {
   const seen = new Set<string>();
+  const components: string[][] = [];
   for (const id of graph.adjacency.keys()) {
     if (seen.has(id) || graph.adjacency.get(id)!.size === 0) continue;
     const component: string[] = [id];
@@ -318,6 +318,16 @@ function computeComponentSizes(graph: Graph): Map<string, number> {
         component.push(neighbor);
       }
     }
+    components.push(component);
+  }
+  return components;
+}
+
+/** Size of each node's connected component, keyed by node id. Nodes with
+ * no neighbors at all are omitted. */
+function computeComponentSizes(graph: Graph): Map<string, number> {
+  const sizes = new Map<string, number>();
+  for (const component of computeComponents(graph)) {
     for (const memberId of component) sizes.set(memberId, component.length);
   }
   return sizes;
@@ -352,15 +362,33 @@ function computePathTo(graph: Graph, current: string, target: string): string[] 
   return path;
 }
 
-/** Fisher-Yates shuffle of every eligible node (see eligibleNodeIds()),
- * minus whatever's in `exclude`. */
+/** Playlist of every eligible node (see eligibleNodeIds()), minus
+ * whatever's in `exclude`, shuffled but grouped by connected component: the
+ * order of components is randomized, and each component's members are
+ * shuffled within it, but members of the same component stay contiguous.
+ * That locality matters once the tour cuts cold into a component that
+ * wasn't reachable from wherever the camera was (see the `!path` branch in
+ * run()) -- the playlist entries immediately following are guaranteed to
+ * belong to that same component, so they're reachable, and the tour ends
+ * up hopping/flying through the rest of that component's members (run()'s
+ * normal BFS-hop path) instead of cold-cutting to an unrelated component
+ * for every one of them. */
 function shufflePlaylist(graph: Graph, exclude: Set<string>): string[] {
-  const ids = eligibleNodeIds(graph).filter((id) => !exclude.has(id));
-  for (let i = ids.length - 1; i > 0; i--) {
+  const eligible = new Set(eligibleNodeIds(graph).filter((id) => !exclude.has(id)));
+  const groups = computeComponents(graph)
+    .map((component) => component.filter((id) => eligible.has(id)))
+    .filter((group) => group.length > 0);
+  shuffleInPlace(groups);
+  for (const group of groups) shuffleInPlace(group);
+  return groups.flat();
+}
+
+/** Fisher-Yates shuffle, in place. */
+function shuffleInPlace<T>(items: T[]): void {
+  for (let i = items.length - 1; i > 0; i--) {
     const j = Math.floor(Math.random() * (i + 1));
-    [ids[i], ids[j]] = [ids[j], ids[i]];
+    [items[i], items[j]] = [items[j], items[i]];
   }
-  return ids;
 }
 
 /** Ease-in-out sine, t in 0..1. Gentler than a cubic ease-in-out -- its
